@@ -1,0 +1,21 @@
+name: Send Daily Emails
+
+on:
+  schedule:
+    # Runs every hour - the backend itself decides which users' local
+    # send-time has just arrived (default 6 AM, sitting in the intended
+    # 6-7AM window), so this stays correct across every user's timezone
+    # without needing a fixed UTC time here. Both this and the ingestion
+    # cron are no-ops if scheduling_mode is set to "manual" in Settings.
+    - cron: "5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call backend email-sending endpoint
+        run: |
+          curl -sf -X POST "${{ secrets.BACKEND_URL }}/internal/send-emails" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            --max-time 120
