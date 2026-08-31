@@ -90,7 +90,7 @@ def delete_category(slug: str, db: Session = Depends(get_db), _admin=Depends(get
     category = db.query(models.Category).filter(models.Category.slug == slug).first()
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
-    category.is_active = False  # soft delete - preserves history on existing stories
+    category.is_active = False
     db.commit()
     return schemas.MessageResponse(message="Category deactivated")
 
@@ -164,29 +164,13 @@ def list_developers(db: Session = Depends(get_db), _admin=Depends(get_current_ad
 
 @router.post("/developers", response_model=schemas.AdminUserOut, status_code=201)
 def create_developer(payload: schemas.DeveloperAccountCreate, db: Session = Depends(get_db), admin=Depends(get_current_admin)):
-    """
-    Creates an account with role='developer'. This grants:
-      - Read-only visibility into stats, sources, settings, verification
-        layers, and pending stories.
-      - Full access to the /api/v1/test/* sandbox (their own API key, test
-        ingestion runs capped to a few clusters, test emails that NEVER go
-        to real subscribers).
-    It does NOT grant: user management, source/settings/verification-layer
-    editing, approving/rejecting real stories, or access to real user data
-    beyond aggregate counts. See auth.py's get_current_developer_or_admin
-    and the endpoints it guards for the exact boundary.
-    """
     existing = db.query(models.User).filter(models.User.email == payload.email.lower()).first()
     if existing:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
-
     free_plan = db.query(models.Plan).filter(models.Plan.slug == "free").first()
     developer = models.User(
-        email=payload.email.lower(),
-        hashed_password=hash_password(payload.password),
-        role="developer",
-        onboarded=True,  # skip the reading-experience onboarding - they don't need it
-        plan_id=free_plan.id if free_plan else None,
+        email=payload.email.lower(), hashed_password=hash_password(payload.password), role="developer",
+        onboarded=True, plan_id=free_plan.id if free_plan else None,
     )
     db.add(developer)
     db.flush()
@@ -216,21 +200,13 @@ def list_api_keys(db: Session = Depends(get_db), _dev=Depends(get_current_develo
 
 @router.post("/api-keys", response_model=schemas.ApiKeyCreatedOut, status_code=201)
 def create_api_key(payload: schemas.ApiKeyCreate, db: Session = Depends(get_db), user=Depends(get_current_developer_or_admin)):
-    """The raw key is shown ONLY in this response - it is never stored or
-    retrievable again, only its hash. If lost, revoke and issue a new one."""
     raw_key = "mb_" + secrets.token_urlsafe(32)
-    api_key = models.ApiKey(
-        name=payload.name,
-        key_prefix=raw_key[:8],
-        key_hash=hash_password(raw_key),
-        created_by_user_id=user.id,
-    )
+    api_key = models.ApiKey(name=payload.name, key_prefix=raw_key[:8], key_hash=hash_password(raw_key), created_by_user_id=user.id)
     db.add(api_key)
     db.flush()
     log_audit(db, "api_key", api_key.id, "created", user, f"name={payload.name}")
     db.commit()
     db.refresh(api_key)
-
     return schemas.ApiKeyCreatedOut(
         id=api_key.id, name=api_key.name, key_prefix=api_key.key_prefix,
         is_active=api_key.is_active, created_at=api_key.created_at,
@@ -258,8 +234,6 @@ def get_audit_log(db: Session = Depends(get_db), _admin=Depends(get_current_admi
 # ---------------- Story moderation / approval workflow ----------------
 @router.get("/stories/pending", response_model=list[schemas.StoryOut])
 def pending_stories(db: Session = Depends(get_db), _dev=Depends(get_current_developer_or_admin)):
-    """Every story awaiting a human decision - this is the ONLY queue that
-    matters now that publication defaults to requiring explicit approval."""
     return db.query(models.Story).options(joinedload(models.Story.citations)) \
         .filter(models.Story.publication_status == "pending", models.Story.is_test_content.is_(False)) \
         .order_by(models.Story.created_at.desc()).all()
@@ -302,9 +276,6 @@ def reject_story(story_id: int, payload: schemas.StoryDecision = schemas.StoryDe
 
 @router.put("/stories/{story_id}", response_model=schemas.StoryOut)
 def update_story(story_id: int, payload: schemas.StoryUpdate, db: Session = Depends(get_db), _admin=Depends(get_current_admin)):
-    """For editing story content directly (headline/summary/category). To
-    approve or reject, use the dedicated endpoints above instead - they keep
-    is_published and publication_status correctly in sync with each other."""
     story = db.query(models.Story).filter(models.Story.id == story_id).first()
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
@@ -325,14 +296,12 @@ def delete_story(story_id: int, db: Session = Depends(get_db), _admin=Depends(ge
     return schemas.MessageResponse(message="Story deleted")
 
 
-# ---------------- Manual trigger actions (always available, regardless of scheduling_mode) ----------------
+# ---------------- Manual trigger actions ----------------
 @router.post("/actions/run-ingestion", response_model=dict)
 def trigger_ingestion(background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin=Depends(get_current_admin)):
     from ..ingestion.pipeline import run_ingestion_background
-
     if get_setting(db, "ingestion_status", "idle") == "running":
         raise HTTPException(status_code=409, detail="Ingestion is already running - check back in a few minutes")
-
     log_audit(db, "ingestion", None, "manual_trigger", admin)
     db.commit()
     background_tasks.add_task(run_ingestion_background)
@@ -359,9 +328,6 @@ def trigger_send_emails(db: Session = Depends(get_db), admin=Depends(get_current
 
 @router.post("/actions/send-test-email", response_model=dict)
 def trigger_test_email(db: Session = Depends(get_db), user=Depends(get_current_developer_or_admin)):
-    """Sends ONE test email to a fixed test address (developer_test_email
-    setting, falling back to the caller's own account email) - never touches
-    the real subscriber list. Safe to click anytime, by anyone with dashboard access."""
     recipient = get_setting(db, "developer_test_email", "") or user.email
     return send_test_email(db, test_recipient=recipient, language=user.content_language)
 
@@ -370,6 +336,11 @@ def trigger_test_email(db: Session = Depends(get_db), user=Depends(get_current_d
 @router.get("/stats", response_model=dict)
 def get_stats(db: Session = Depends(get_db), _dev=Depends(get_current_developer_or_admin)):
     today = datetime.date.today().isoformat()
+    approved_query = db.query(models.Story).filter(
+        models.Story.publication_status == "approved",
+        models.Story.is_published.is_(True),
+        models.Story.is_test_content.is_(False),
+    )
     return {
         "total_users": db.query(models.User).filter(models.User.role == "user").count(),
         "active_users": db.query(models.User).filter(models.User.is_active.is_(True), models.User.role == "user").count(),
@@ -377,15 +348,12 @@ def get_stats(db: Session = Depends(get_db), _dev=Depends(get_current_developer_
         "developer_accounts": db.query(models.User).filter(models.User.role == "developer").count(),
         "todays_stories": db.query(models.Story).filter(models.Story.edition_date == today, models.Story.is_test_content.is_(False)).count(),
         "pending_approval": db.query(models.Story).filter(models.Story.publication_status == "pending", models.Story.is_test_content.is_(False)).count(),
-        "approved_today": db.query(models.Story).filter(
-            models.Story.edition_date == today, models.Story.publication_status == "approved", models.Story.is_test_content.is_(False)
-        ).count(),
+        "approved_today": approved_query.filter(models.Story.edition_date == today).count(),
+        "approved_total": approved_query.count(),
         "active_sources": db.query(models.Source).filter(models.Source.is_active.is_(True)).count(),
         "high_risk_sources": db.query(models.Source).filter(models.Source.legal_risk_level == "high_risk").count(),
         "sources_with_errors": db.query(models.Source).filter(models.Source.last_fetch_error.isnot(None)).count(),
-        "emails_sent_today": db.query(models.EmailLog).filter(
-            models.EmailLog.edition_date == today, models.EmailLog.status == "sent"
-        ).count(),
+        "emails_sent_today": db.query(models.EmailLog).filter(models.EmailLog.edition_date == today, models.EmailLog.status == "sent").count(),
         "scheduling_mode": get_setting(db, "scheduling_mode", "auto"),
         "skip_all_verification": get_setting(db, "skip_all_verification", "false") == "true",
         "require_human_approval_all": get_setting(db, "require_human_approval_all", "true") == "true",
