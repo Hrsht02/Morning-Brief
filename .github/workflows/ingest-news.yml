@@ -2,21 +2,32 @@ name: Ingest News
 
 on:
   schedule:
-    # Runs every hour during the day for fresh news throughout the day...
     - cron: "0 * * * *"
-    # ...PLUS an explicit final pass at 23:45 IST (18:15 UTC) - like a
-    # newspaper's print deadline, this captures anything published right up
-    # to midnight before the 6-7AM email goes out. Adjust the UTC offset here
-    # if your admin_timezone setting (in Settings) isn't Asia/Kolkata.
-    - cron: "15 18 * * *"
-  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab too
+    - cron: "15 18 * * *" # 23:45 IST final pass
+  workflow_dispatch: {}
+
+concurrency:
+  group: morning-brief-ingestion
+  cancel-in-progress: false
 
 jobs:
   ingest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Call backend ingestion endpoint
+      - name: Call backend ingestion endpoint with retries
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          curl -sf -X POST "${{ secrets.BACKEND_URL }}/internal/run-ingestion" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-            --max-time 120
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --show-error --silent --retry 0 --max-time 120 \
+              -X POST "${BACKEND_URL}/internal/run-ingestion" \
+              -H "X-Cron-Secret: ${CRON_SECRET}"; then
+              exit 0
+            fi
+            echo "Ingestion trigger failed (attempt ${attempt}/5)"
+            sleep $((attempt * 10))
+          done
+          exit 1
