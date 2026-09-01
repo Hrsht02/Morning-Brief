@@ -29,3 +29,12 @@ def job_status(db:Session=Depends(get_db),_=Depends(get_current_developer_or_adm
 @router.get("/health/details",response_model=dict)
 def detailed_health(db:Session=Depends(get_db),_=Depends(get_current_developer_or_admin)):
     return {"status":"ok","checked_at":datetime.datetime.utcnow().isoformat(),"database":"ok","groq_configured":bool(settings.GROQ_API_KEY),"gemini_configured":bool(settings.GEMINI_API_KEY),"brevo_configured":bool(settings.BREVO_API_KEY)}
+
+@router.post("/actions/test-automatic-email",response_model=dict)
+def test_automatic_email(db:Session=Depends(get_db),_=Depends(get_current_developer_or_admin)):
+    """Safely test the same automatic-email eligibility path without emailing a subscriber."""
+    from ..email_service.scheduler_test import test_automatic_email as run_test
+    try:
+        return run_test(db)
+    except Exception as exc:
+        return {"status":"error","would_send":False,"reason":str(exc)[:500]}
