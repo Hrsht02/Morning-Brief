@@ -1,8 +1,9 @@
 import { useState } from "react";
 import api from "../api";
+import SandboxCheck from "../components/admin/SandboxCheck";
 
 function CheckList({ title, checks = [] }) {
-  return <div style={{ marginTop: 18 }}><h3 style={{ fontFamily: "var(--serif)" }}>{title}</h3>{checks.map((c) => <div key={c.name} style={{ padding: "9px 0", borderBottom: "1px solid var(--border)" }}><strong>{c.passed ? "✓" : "✕"} {c.name}</strong><div style={{ color: "var(--ink-faint)", fontSize: 12.5 }}>{c.detail}</div></div>)}</div>;
+  return <div style={{ marginTop: 18 }}><h3 style={{ fontFamily: "var(--serif)" }}>{title}</h3>{checks.map((c) => <SandboxCheck key={c.name} check={c} />)}</div>;
 }
 
 export default function Sandbox() {
