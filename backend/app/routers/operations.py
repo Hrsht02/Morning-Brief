@@ -33,8 +33,8 @@ def detailed_health(db:Session=Depends(get_db),_=Depends(get_current_developer_o
 @router.post("/actions/test-automatic-email",response_model=dict)
 def test_automatic_email(db:Session=Depends(get_db),_=Depends(get_current_developer_or_admin)):
     """Safely test the same automatic-email eligibility path without emailing a subscriber."""
-    from ..email_service.scheduler_test import test_automatic_email as run_test
+    from ..email_service.scheduler_test import run_automatic_email_test
     try:
-        return run_test(db)
+        return run_automatic_email_test(db)
     except Exception as exc:
         return {"status":"error","would_send":False,"reason":str(exc)[:500]}
