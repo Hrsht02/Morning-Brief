@@ -5,25 +5,26 @@
 1. Start backend and frontend with a non-production database/environment.
 2. Log in as an admin.
 3. Open `/admin/sandbox`.
-4. Run **System health**. Fix every red check before deployment.
-5. Run **Check all features**. Confirm sources, categories and approved stories exist.
-6. Run **Simulate automatic email**. This is read-only: it evaluates every active onboarded reader against their timezone, configured send time, duplicate-delivery state and approved local edition. It does not send mail.
-7. Run **Send safe test email** only after `BREVO_API_KEY`, sender settings and the developer/test recipient are configured. This is the only sandbox action that sends mail.
-8. Separately test **Send latest approved news** only with a dedicated test user/database before using real subscribers.
+4. Run **Run full sandbox suite**. Fix every failed readiness check before deployment.
+5. Review the automatic-email simulation for every active onboarded reader. Confirm timezone, configured send time, current local date, approved story count, selected story count, country fallback and duplicate-delivery decision.
+6. Run **Send safe test email** only after `BREVO_API_KEY`, sender settings and the developer/test recipient are configured. This is the only sandbox action that sends mail.
+7. Separately test **Send latest approved news** only with a dedicated test user/database before using real subscribers.
 
 ## What the automatic simulation proves
 
-The simulation checks the same important eligibility inputs used by scheduled delivery:
+The simulation is read-only and checks the important scheduled-delivery gates:
 
 - active and onboarded reader
 - reader timezone
-- configured send hour/minute
+- configured send hour/minute and one-hour scheduler window
 - current local date
 - approved, published, non-test stories for that local date
-- already-sent protection
-- country/category personalization and the configured edition story limit
+- successful email-log duplicate protection
+- country/category personalization
+- configured edition story limit
+- effective country/fallback resolution
 
-It reports `WOULD SEND` without changing `last_sent_date` or writing an email delivery record.
+It reports `WOULD SEND` or an explicit reason such as `outside_send_window`, `already_delivered`, `no_approved_stories`, or `no_personalized_stories`. It does not change `last_sent_date`, create an `EmailLog`, or call the email provider.
 
 ## API endpoints
 
@@ -32,6 +33,7 @@ All require an authenticated admin:
 - `GET /admin/sandbox/health` — deployment/configuration readiness
 - `GET /admin/sandbox/features` — core feature/data readiness
 - `GET /admin/sandbox/automatic-email` — read-only scheduler simulation
+- `GET /admin/sandbox/suite` — one-click read-only suite combining health, features and automatic-email simulation
 - `POST /admin/actions/send-test-email` — real provider delivery to the configured test address
 
 ## Backend tests
@@ -42,6 +44,8 @@ From `backend/`:
 pip install -r requirements.txt
 pytest -q
 ```
+
+CI runs compilation, application import, and the full pytest suite on every PR to `main`.
 
 ## Frontend checks
 
@@ -54,4 +58,4 @@ npm run build
 
 ## Production rule
 
-Never use the real-user manual send as the first email test. First use the sandbox simulation, then the safe test email, then a dedicated test subscriber/database, and only then enable scheduled delivery for real subscribers.
+Never use the real-user manual send as the first email test. First use the sandbox suite, then the safe test email, then a dedicated test subscriber/database, and only then enable scheduled delivery for real subscribers.
