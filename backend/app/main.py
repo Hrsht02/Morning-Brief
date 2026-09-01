@@ -8,14 +8,27 @@ from .database import Base, engine, SessionLocal, run_additive_migrations
 from .config import settings
 from .seed import run_seed
 from .routers import auth, users, editions, categories, admin, scheduler, api_v1
-from .routers import operations
+from .routers import operations, sandbox
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("morning_brief")
 
 app = FastAPI(title="Morning Brief API", description="Country-aware LLM-powered daily news digest.", version="2.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=[settings.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173"],
-                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# Production frontend plus local development and this project's Vercel preview
+# deployments. The regex is intentionally scoped to the known Vercel project
+# and team slug instead of allowing arbitrary origins.
+VERCEL_PREVIEW_ORIGIN_REGEX = (
+    r"^https://morning-brief-[a-z0-9]+-harshit-kumars-projects-ed3c626f\.vercel\.app$"
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=VERCEL_PREVIEW_ORIGIN_REGEX,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(Exception)
@@ -47,6 +60,7 @@ app.include_router(editions.router)
 app.include_router(categories.router)
 app.include_router(admin.router)
 app.include_router(operations.router)
+app.include_router(sandbox.router)
 app.include_router(scheduler.router)
 app.include_router(api_v1.router)
 

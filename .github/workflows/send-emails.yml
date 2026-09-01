@@ -1,8 +1,11 @@
 name: Send Daily Emails
 
 on:
+  # Five-minute cadence supports the admin sandbox's one-shot test email.
+  # Production subscriber delivery still respects each user's configured
+  # one-hour send window.
   schedule:
-    - cron: "5 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -14,6 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Run due safe sandbox test email
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          curl --fail --show-error --silent --max-time 120 \
+            -X POST "${BACKEND_URL}/internal/run-sandbox-test-email" \
+            -H "X-Cron-Secret: ${CRON_SECRET}"
+
       - name: Call backend email endpoint with retries
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
