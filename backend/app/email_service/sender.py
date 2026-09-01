@@ -10,15 +10,24 @@ from .brevo_client import send_email, render_digest_email, EmailSendError
 from ..config import settings
 
 logger = logging.getLogger("morning_brief.email")
+FIXED_DELIVERY_HOUR = 6
+FIXED_DELIVERY_MINUTE = 0
+DELIVERY_WINDOW_MINUTES = 60
 
 
-def _is_users_send_time_now(user, window_minutes=60):
+def _is_users_send_time_now(user, window_minutes=DELIVERY_WINDOW_MINUTES):
+    """Return true during the fixed 06:00 local-time delivery window.
+
+    User-configured send_hour/send_minute are intentionally ignored. The
+    product has one predictable delivery promise: 06:00 in each reader's
+    local timezone.
+    """
     try:
         tz = zoneinfo.ZoneInfo(user.timezone)
     except Exception:
         tz = zoneinfo.ZoneInfo("UTC")
     now = datetime.datetime.now(tz)
-    target = now.replace(hour=user.send_hour, minute=user.send_minute, second=0, microsecond=0)
+    target = now.replace(hour=FIXED_DELIVERY_HOUR, minute=FIXED_DELIVERY_MINUTE, second=0, microsecond=0)
     return 0 <= (now - target).total_seconds() / 60 < window_minutes
 
 
@@ -39,7 +48,6 @@ def _get_approved_stories_for_edition(db: Session, edition_date: str):
 
 
 def _get_latest_approved_edition_date(db: Session, local_today: datetime.date) -> str | None:
-    """Find the newest approved edition available up to the user's local date."""
     row = db.query(models.Story.edition_date).filter(
         models.Story.edition_date <= local_today.isoformat(),
         models.Story.is_published.is_(True),
@@ -50,25 +58,12 @@ def _get_latest_approved_edition_date(db: Session, local_today: datetime.date) -
 
 
 def _latest_approval_time(stories):
-    """Return the newest approval timestamp, falling back to creation time."""
     timestamps = [getattr(s, "reviewed_at", None) or getattr(s, "created_at", None) for s in stories]
     timestamps = [t for t in timestamps if t is not None]
     return max(timestamps) if timestamps else None
 
 
 def _already_delivered_current_content(db: Session, user_id: int, edition_date: str, stories, local_today: datetime.date, force: bool):
-    """Check whether this exact approved edition was already delivered.
-
-    The old implementation used only User.last_sent_date. That caused an
-    important bug: if an edition was sent yesterday, an admin could not press
-    the manual Send button today to deliver the already-approved edition.
-
-    We now use the successful EmailLog timestamp plus the newest approval time.
-    A manual send is skipped only when the edition was already sent today and
-    no newer approved story has been added since that delivery. A scheduled
-    send remains date-safe and will not resend an edition after successful
-    delivery.
-    """
     last_log = db.query(models.EmailLog).filter(
         models.EmailLog.user_id == user_id,
         models.EmailLog.edition_date == edition_date,
@@ -76,30 +71,24 @@ def _already_delivered_current_content(db: Session, user_id: int, edition_date: 
     ).order_by(models.EmailLog.sent_at.desc()).first()
     if not last_log:
         return False
-
     newest_approval = _latest_approval_time(stories)
     sent_at = last_log.sent_at
     if newest_approval is not None and sent_at is not None and newest_approval > sent_at:
         return False
-
     if force:
-        # Manual Send means "send the currently approved edition now". A
-        # delivery from a previous day must not block today's explicit send.
         return sent_at is not None and sent_at.date() == local_today
-
     return True
 
 
 def send_daily_emails(db: Session, force=False):
     """Send approved editions to eligible users.
 
-    Normal scheduled runs send the user's local-date edition during the
-    configured send-time window. Manual `force=True` sends the newest approved
-    edition available up to the user's local date, regardless of the clock.
-    Manual delivery can therefore be used after approving an edition from a
-    previous day. It still prevents duplicate delivery on the same day and
-    automatically re-sends an edition when newer stories were approved after
-    the previous delivery.
+    Scheduled delivery is fixed at 06:00 local time for every user. Users do
+    not choose a delivery hour. Their timezone is retained so international
+    readers still receive the briefing at 06:00 where they live.
+
+    Manual `force=True` sends the newest approved edition immediately and is
+    unaffected by the clock.
     """
     users = db.query(models.User).filter(
         models.User.is_active.is_(True), models.User.onboarded.is_(True), models.User.role == "user"
@@ -114,28 +103,16 @@ def send_daily_emails(db: Session, force=False):
             tz = zoneinfo.ZoneInfo("UTC")
         local_today_date = datetime.datetime.now(tz).date()
         local_today = local_today_date.isoformat()
-
         edition_date = _get_latest_approved_edition_date(db, local_today_date) if force else local_today
         if not edition_date:
-            skipped += 1
-            skip_reasons["no_edition"] += 1
-            continue
-
+            skipped += 1; skip_reasons["no_edition"] += 1; continue
         stories = _get_approved_stories_for_edition(db, edition_date)
         if not stories:
-            skipped += 1
-            skip_reasons["no_stories"] += 1
-            continue
-
+            skipped += 1; skip_reasons["no_stories"] += 1; continue
         if _already_delivered_current_content(db, user.id, edition_date, stories, local_today_date, force):
-            skipped += 1
-            skip_reasons["already_delivered"] += 1
-            continue
-
-        if not force and not _is_users_send_time_now(user, window_minutes=60):
-            skipped += 1
-            skip_reasons["outside_window"] += 1
-            continue
+            skipped += 1; skip_reasons["already_delivered"] += 1; continue
+        if not force and not _is_users_send_time_now(user):
+            skipped += 1; skip_reasons["outside_window"] += 1; continue
 
         selected, _ = select_personalized_stories(
             stories,
@@ -145,43 +122,23 @@ def send_daily_emails(db: Session, force=False):
             int(get_setting(db, "outside_bubble_min_stories", "1")),
         )
         if not selected:
-            skipped += 1
-            skip_reasons["no_personalized_stories"] += 1
-            continue
-
+            skipped += 1; skip_reasons["no_personalized_stories"] += 1; continue
         localized = [_localize_for_email(s, user.content_language) for s in selected]
         try:
-            html = render_digest_email(
-                localized,
-                edition_date,
-                settings.FRONTEND_URL,
-                max_stories=len(localized),
-            )
+            html = render_digest_email(localized, edition_date, settings.FRONTEND_URL, max_stories=len(localized))
             subject_prefix = "Your Morning Brief" if not force else "Your Morning Brief — Approved Edition"
-            send_email(
-                to_email=user.email,
-                subject=f"{subject_prefix} — {edition_date}",
-                html_content=html,
-            )
+            send_email(to_email=user.email, subject=f"{subject_prefix} — {edition_date}", html_content=html)
             user.last_sent_date = edition_date
             db.add(models.EmailLog(user_id=user.id, edition_date=edition_date, status="sent"))
             sent += 1
         except EmailSendError as exc:
-            db.add(models.EmailLog(user_id=user.id, edition_date=edition_date, status="failed", error=str(exc)[:500]))
-            failed += 1
+            db.add(models.EmailLog(user_id=user.id, edition_date=edition_date, status="failed", error=str(exc)[:500])); failed += 1
         except Exception as exc:
             logger.exception("Unexpected email error for user %s", user.id)
-            db.add(models.EmailLog(user_id=user.id, edition_date=edition_date, status="failed", error=str(exc)[:500]))
-            failed += 1
+            db.add(models.EmailLog(user_id=user.id, edition_date=edition_date, status="failed", error=str(exc)[:500])); failed += 1
 
     db.commit()
-    return {
-        "status": "ok",
-        "sent": sent,
-        "failed": failed,
-        "skipped": skipped,
-        "skip_reasons": skip_reasons,
-    }
+    return {"status": "ok", "sent": sent, "failed": failed, "skipped": skipped, "skip_reasons": skip_reasons}
 
 
 def send_test_email(db: Session, test_recipient: str, language: str = "en"):

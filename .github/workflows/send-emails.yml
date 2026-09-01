@@ -1,10 +1,9 @@
 name: Send Daily Emails
 
 on:
-  # GitHub Actions is the lightweight production trigger. It checks every
-  # five minutes, so a sandbox test scheduled for HH:MM is sent at the first
-  # check at or after that time (normally within 0-5 minutes).
   schedule:
+    # Backend evaluates each subscriber in their own timezone and sends only
+    # during the fixed 06:00 local-time window.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
@@ -13,45 +12,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sandbox-test:
-    # Keep sandbox testing independent from real subscriber delivery.
-    # A temporary Render wake-up/network failure must never block production.
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Run due safe sandbox test email
-        env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
-        run: |
-          set -u
-          for attempt in 1 2 3 4 5; do
-            echo "Sandbox test check ${attempt}/5"
-            response_file="$(mktemp)"
-            http_code="$(curl --silent --show-error --output "$response_file" --write-out "%{http_code}" --max-time 120 \
-              -X POST "${BACKEND_URL}/internal/run-sandbox-test-email" \
-              -H "X-Cron-Secret: ${CRON_SECRET}" || true)"
-            echo "HTTP ${http_code}"
-            cat "$response_file" || true
-            rm -f "$response_file"
-
-            if [ "$http_code" = "200" ]; then
-              exit 0
-            fi
-
-            echo "Sandbox trigger failed; retrying..."
-            sleep $((attempt * 10))
-          done
-
-          # Do not stop the real subscriber email job because the sandbox
-          # endpoint was temporarily unavailable.
-          echo "Sandbox check could not reach the backend after 5 attempts."
-          exit 1
-
   send:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Validate required secrets
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${BACKEND_URL}" || { echo "BACKEND_URL GitHub secret is missing"; exit 1; }
+          test -n "${CRON_SECRET}" || { echo "CRON_SECRET GitHub secret is missing"; exit 1; }
+
       - name: Call backend email endpoint with retries
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
@@ -59,11 +32,14 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3 4 5; do
-            if curl --fail --show-error --silent --max-time 120 \
-              -X POST "${BACKEND_URL}/internal/send-emails" \
-              -H "X-Cron-Secret: ${CRON_SECRET}"; then
-              exit 0
-            fi
+            response_file="$(mktemp)"
+            http_code="$(curl --silent --show-error --output "$response_file" --write-out "%{http_code}" --max-time 120 \
+              -X POST "${BACKEND_URL%/}/internal/send-emails" \
+              -H "X-Cron-Secret: ${CRON_SECRET}" || true)"
+            echo "HTTP ${http_code}"
+            cat "$response_file" || true
+            rm -f "$response_file"
+            if [ "$http_code" = "200" ]; then exit 0; fi
             echo "Email trigger failed (attempt ${attempt}/5)"
             sleep $((attempt * 10))
           done

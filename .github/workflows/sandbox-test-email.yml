@@ -1,0 +1,32 @@
+name: Sandbox Test Email
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: morning-brief-sandbox-test
+  cancel-in-progress: false
+
+jobs:
+  run-due-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check and send due sandbox test
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${BACKEND_URL}" || { echo "BACKEND_URL GitHub secret is missing"; exit 1; }
+          test -n "${CRON_SECRET}" || { echo "CRON_SECRET GitHub secret is missing"; exit 1; }
+          response_file="$(mktemp)"
+          http_code="$(curl --silent --show-error --output "$response_file" --write-out "%{http_code}" --max-time 120 \
+            -X POST "${BACKEND_URL%/}/internal/run-sandbox-test-email" \
+            -H "X-Cron-Secret: ${CRON_SECRET}")"
+          echo "HTTP ${http_code}"
+          cat "$response_file"
+          rm -f "$response_file"
+          test "$http_code" = "200"
