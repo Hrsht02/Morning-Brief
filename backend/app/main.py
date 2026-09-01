@@ -8,7 +8,7 @@ from .database import Base, engine, SessionLocal, run_additive_migrations
 from .config import settings
 from .seed import run_seed
 from .routers import auth, users, editions, categories, admin, scheduler, api_v1
-from .routers import operations
+from .routers import operations, sandbox
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("morning_brief")
@@ -47,6 +47,7 @@ app.include_router(editions.router)
 app.include_router(categories.router)
 app.include_router(admin.router)
 app.include_router(operations.router)
+app.include_router(sandbox.router)
 app.include_router(scheduler.router)
 app.include_router(api_v1.router)
 
