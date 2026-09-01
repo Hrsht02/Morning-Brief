@@ -23,6 +23,10 @@ jobs:
         env:
           ENVIRONMENT: development
         run: cd backend && python -c "from app.main import app; print(app.title, app.version)"
+      - name: Run backend tests
+        env:
+          ENVIRONMENT: development
+        run: cd backend && pytest -q
 
   frontend:
     runs-on: ubuntu-latest
