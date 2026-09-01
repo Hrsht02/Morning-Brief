@@ -1,8 +1,9 @@
 """Safe production-scheduler email test.
 
-This exercises the same eligibility rules used by automatic delivery, but sends
-exactly one message to the configured developer test address instead of any
-real subscriber and never writes a delivery log or last_sent_date.
+This module is an application helper, not a pytest test module. The filename is
+kept for backwards compatibility with the existing admin endpoint, while the
+callable intentionally does not start with ``test_`` so pytest will not execute
+it as a test requiring a database fixture or send email during CI.
 """
 import datetime
 import zoneinfo
@@ -11,25 +12,12 @@ from .. import models
 from ..seed import get_setting
 from ..services.personalization import select_personalized_stories
 from .brevo_client import send_email, render_digest_email
-from .sender import _get_approved_stories_for_edition, _get_latest_approved_edition_date, _is_users_send_time_now, _localize_for_email
+from .sender import _get_approved_stories_for_edition, _is_users_send_time_now, _localize_for_email
 from ..config import settings
 
 
-def test_automatic_email(db: Session, test_recipient: str | None = None):
-    """Test automatic email delivery safely.
-
-    The test:
-    - requires automatic scheduling to be enabled;
-    - finds an active, onboarded subscriber who would be eligible for the
-      automatic scheduler right now;
-    - uses that subscriber's timezone, send time, language and categories;
-    - selects the same approved production stories the real scheduler would;
-    - sends one test email only to developer_test_email (or the admin caller's
-      configured fallback), never to the subscriber;
-    - does not update EmailLog or User.last_sent_date.
-
-    Set developer_test_email in Admin -> Settings before using this endpoint.
-    """
+def run_automatic_email_test(db: Session, test_recipient: str | None = None):
+    """Safely exercise automatic-email eligibility using a test recipient only."""
     if get_setting(db, "scheduling_mode", "auto") != "auto":
         return {"status": "skipped", "reason": "scheduling_mode is 'manual'", "would_send": False}
 
@@ -55,12 +43,10 @@ def test_automatic_email(db: Session, test_recipient: str | None = None):
         edition_date = local_today.isoformat()
         stories = _get_approved_stories_for_edition(db, edition_date)
         if not stories:
-            # Automatic delivery is date-based, so do not silently substitute
-            # yesterday's edition in this test.
             continue
         if not _is_users_send_time_now(user, window_minutes=60):
             continue
-        candidates.append((user, stories, tz, edition_date))
+        candidates.append((user, stories, edition_date))
 
     if not candidates:
         return {
@@ -71,7 +57,7 @@ def test_automatic_email(db: Session, test_recipient: str | None = None):
             "send_window": "06:00-07:00 local by default",
         }
 
-    user, stories, tz, edition_date = candidates[0]
+    user, stories, edition_date = candidates[0]
     selected, resolution = select_personalized_stories(
         stories,
         user.country_code,
