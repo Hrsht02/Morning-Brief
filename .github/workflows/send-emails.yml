@@ -3,7 +3,7 @@ name: Send Daily Emails
 on:
   # Five-minute cadence supports the admin sandbox's one-shot test email.
   # Production subscriber delivery still respects each user's configured
-  # one-hour send window, so this does not make production sends random.
+  # one-hour send window.
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
@@ -24,8 +24,8 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --show-error --silent --max-time 120 \
-            -X POST "${BACKEND_URL}/admin/sandbox/test-email-schedule/run-due" \
-            -H "X-Cron-Secret: ${CRON_SECRET}" || true
+            -X POST "${BACKEND_URL}/internal/run-sandbox-test-email" \
+            -H "X-Cron-Secret: ${CRON_SECRET}"
 
       - name: Call backend email endpoint with retries
         env:
