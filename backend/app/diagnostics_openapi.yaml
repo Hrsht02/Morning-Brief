@@ -1,0 +1,58 @@
+openapi: 3.0.3
+info:
+  title: Morning Brief Diagnostics API
+  version: 1.0.0
+  description: Safe operator diagnostics and one-shot test controls. Never exposes secrets.
+servers:
+  - url: https://morning-brief-otem.onrender.com
+security:
+  - DiagnosticsKey: []
+components:
+  securitySchemes:
+    DiagnosticsKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Diagnostics-Key
+  schemas:
+    ScheduleRequest:
+      type: object
+      required: [hour, minute]
+      properties:
+        hour: {type: integer, minimum: 0, maximum: 23}
+        minute: {type: integer, minimum: 0, maximum: 59}
+paths:
+  /admin/diagnostics/health:
+    get:
+      operationId: diagnosticHealth
+      summary: Check core service health
+      responses: {'200': {description: OK}}
+  /admin/diagnostics/email:
+    get:
+      operationId: diagnosticEmail
+      summary: Inspect safe email readiness and approved-story counts
+      responses: {'200': {description: OK}}
+  /admin/diagnostics/scheduler:
+    get:
+      operationId: diagnosticScheduler
+      summary: Inspect scheduler configuration and pending sandbox test
+      responses: {'200': {description: OK}}
+  /admin/diagnostics/test-email:
+    get:
+      operationId: scheduledTestStatus
+      summary: Get one-shot sandbox test status
+      responses: {'200': {description: OK}}
+  /admin/diagnostics/test-email/schedule:
+    post:
+      operationId: scheduleTestEmail
+      summary: Schedule one safe test email at HH:MM in admin timezone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScheduleRequest'}
+      responses: {'200': {description: Scheduled}}
+  /admin/diagnostics/test-email/cancel:
+    post:
+      operationId: cancelTestEmail
+      summary: Cancel pending safe test email
+      responses: {'200': {description: Cancelled}}

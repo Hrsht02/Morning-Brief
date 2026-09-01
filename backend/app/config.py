@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     EMAIL_FROM_ADDRESS: str = "news@example.com"
     EMAIL_FROM_NAME: str = "Morning Brief"
     CRON_SECRET: str = "insecure-default-change-me"
+    ADMIN_DIAGNOSTICS_KEY: str = ""
     FRONTEND_URL: str = "http://localhost:5173"
     ADMIN_EMAIL: str = "admin@example.com"
     ADMIN_PASSWORD: str = "admin123"
