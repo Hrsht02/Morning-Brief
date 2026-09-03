@@ -10,7 +10,7 @@ from ..database import get_db
 from ..seed import get_setting
 from ..services.personalization import SUPPORTED_COUNTRIES
 from ..services.job_status import get_job
-from ..services.time_settings import admin_timezone, configured_email_time, next_scheduled_email
+from ..services.schedule_service import get_schedule
 
 router = APIRouter(prefix="/admin", tags=["admin/operations"])
 
@@ -28,13 +28,16 @@ def job_status(db: Session = Depends(get_db), _=Depends(get_current_developer_or
     raw = get_setting(db, "ingestion_last_result", "")
     try: last = json.loads(raw) if raw else None
     except json.JSONDecodeError: last = None
-    tz = admin_timezone(db); hour, minute = configured_email_time(db); next_email = next_scheduled_email(db).isoformat()
+    email_schedule = get_schedule(db, "email")
+    ingestion_schedule = get_schedule(db, "ingestion")
     test_schedule = {"enabled": get_setting(db, "sandbox_test_email_enabled", "false").lower() == "true", "scheduled_at": get_setting(db, "sandbox_test_email_scheduled_at", "") or None}
+    ingestion_job = get_job(db, "ingestion")
     return {
-        "ingestion": {"status": get_setting(db, "ingestion_status", "ready"), "started_at": get_setting(db, "ingestion_started_at", ""), "completed_at": get_setting(db, "ingestion_completed_at", ""), "last_result": last},
+        "ingestion": {"status": ingestion_job.get("status", "ready"), "started_at": get_setting(db, "ingestion_started_at", ""), "completed_at": get_setting(db, "ingestion_completed_at", ""), "last_result": last, "job": ingestion_job},
         "email": get_job(db, "email"),
         "test_email": get_job(db, "test_email"),
-        "schedule": {"mode": get_setting(db, "scheduling_mode", "auto"), "admin_timezone": str(tz), "email_time": f"{hour:02d}:{minute:02d}", "next_email_at": next_email, "test_schedule": test_schedule},
+        "schedules": {"timezone": get_setting(db, "admin_timezone", "Asia/Kolkata"), "email": email_schedule, "ingestion": ingestion_schedule, "test_email": test_schedule, "mode": get_setting(db, "scheduling_mode", "auto")},
+        "schedule": {"mode": get_setting(db, "scheduling_mode", "auto"), "admin_timezone": get_setting(db, "admin_timezone", "Asia/Kolkata"), "email_time": email_schedule.get("time", "06:00"), "next_email_at": email_schedule.get("next_run_at"), "test_schedule": test_schedule},
     }
 
 @router.get("/health/details", response_model=dict)
