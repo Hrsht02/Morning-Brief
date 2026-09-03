@@ -72,17 +72,22 @@ def _run_test_worker():
 def run_due_production_job(job_type: str) -> dict:
     """Claim and launch one due production job; safe for runtime or cron calls."""
     if job_type not in {"email", "ingestion"}: return {"status": "error", "detail": "Unsupported production job"}
-    db = SessionLocal()
+    db = SessionLocal(); acquired = False
     try:
         if get_setting(db, "scheduling_mode", "auto").lower() != "auto": return {"status": "skipped", "detail": "Automatic scheduling is disabled"}
         if get_job(db, job_type).get("status") == "in_progress": return {"status": "in_progress", "detail": f"{job_type} is already running"}
-        if not _locks[job_type].acquire(blocking=False): return {"status": "in_progress", "detail": f"{job_type} is already being claimed"}
+        acquired = _locks[job_type].acquire(blocking=False)
+        if not acquired: return {"status": "in_progress", "detail": f"{job_type} is already being claimed"}
         schedule = claim_due(db, job_type)
         if not schedule:
-            _locks[job_type].release(); return {"status": "waiting", "detail": "No due schedule"}
+            _locks[job_type].release(); acquired = False; return {"status": "waiting", "detail": "No due schedule"}
         worker = _run_email_worker if job_type == "email" else _run_ingestion_worker
         threading.Thread(target=worker, args=(schedule,), daemon=True, name=f"{job_type}-scheduler-worker").start()
+        acquired = False
         return {"status": "in_progress", "detail": f"{job_type} schedule claimed and started"}
+    except Exception:
+        if acquired: _locks[job_type].release()
+        raise
     finally:
         db.close()
 
@@ -91,17 +96,14 @@ def _tick():
     for job_type in ("ingestion", "email"):
         try: run_due_production_job(job_type)
         except Exception: logger.exception("%s scheduler tick failed", job_type)
-
     db = SessionLocal()
     try:
-        enabled = get_setting(db, "sandbox_test_email_enabled", "false").lower() == "true"
-        target = get_setting(db, "sandbox_test_email_scheduled_at", "")
+        enabled = get_setting(db, "sandbox_test_email_enabled", "false").lower() == "true"; target = get_setting(db, "sandbox_test_email_scheduled_at", "")
         if enabled and target and _locks["test_email"].acquire(blocking=False):
             try:
                 due = datetime.datetime.fromisoformat(target)
                 if due.tzinfo is None: due = due.replace(tzinfo=datetime.timezone.utc)
-                if datetime.datetime.now(datetime.timezone.utc) >= due:
-                    threading.Thread(target=_run_test_worker, daemon=True, name="test-email-worker").start()
+                if datetime.datetime.now(datetime.timezone.utc) >= due: threading.Thread(target=_run_test_worker, daemon=True, name="test-email-worker").start()
                 else: _locks["test_email"].release()
             except ValueError: _locks["test_email"].release()
     finally: db.close()
