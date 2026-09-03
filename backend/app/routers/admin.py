@@ -11,6 +11,7 @@ from ..security import hash_password
 from ..seed import get_setting
 from ..email_service.sender import send_daily_emails, send_test_email
 from ..services.job_status import complete_job, fail_job, get_job, start_job
+from ..services.schedule_service import configure_schedule, get_schedule, cancel_schedule
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -78,6 +79,24 @@ def update_setting(key: str, payload: schemas.SettingUpdate, db: Session = Depen
             value = f"{hour:02d}:{minute:02d}"
         except Exception: raise HTTPException(status_code=422, detail=f"{key} must use HH:MM 24-hour format")
     row.value = value; log_audit(db, "setting", key, "updated", admin, notes=f"value={value}"); db.commit(); return {"status": "updated", "key": key, "value": value}
+
+@router.get("/schedules", response_model=dict)
+def list_schedules(db: Session = Depends(get_db), _=Depends(get_current_developer_or_admin)):
+    return {"timezone": get_setting(db, "admin_timezone", "Asia/Kolkata"), "email": get_schedule(db, "email"), "ingestion": get_schedule(db, "ingestion")}
+
+@router.put("/schedules/{job_type}", response_model=dict)
+def update_schedule(job_type: str, payload: dict, db: Session = Depends(get_db), admin=Depends(get_current_admin)):
+    if job_type not in {"email", "ingestion"}: raise HTTPException(status_code=404, detail="Unsupported schedule type")
+    try:
+        schedule = configure_schedule(db, job_type, frequency=str(payload.get("frequency", "daily")), date=payload.get("date"), time=str(payload.get("time", "06:00")), freshness_mode=payload.get("freshness_mode"), freshness_after=payload.get("freshness_after"))
+    except ValueError as exc: raise HTTPException(status_code=422, detail=str(exc))
+    log_audit(db, "schedule", job_type, "configured", admin, notes=json.dumps(schedule, separators=(",", ":"))); db.commit()
+    return schedule
+
+@router.delete("/schedules/{job_type}", response_model=dict)
+def disable_schedule(job_type: str, db: Session = Depends(get_db), admin=Depends(get_current_admin)):
+    if job_type not in {"email", "ingestion"}: raise HTTPException(status_code=404, detail="Unsupported schedule type")
+    schedule = cancel_schedule(db, job_type); log_audit(db, "schedule", job_type, "cancelled", admin); db.commit(); return schedule
 
 @router.get("/verification-layers", response_model=list[schemas.VerificationLayerOut])
 def list_verification_layers(db: Session = Depends(get_db), _=Depends(get_current_developer_or_admin)):
@@ -169,8 +188,8 @@ def delete_story(story_id: int, db: Session = Depends(get_db), admin=Depends(get
 @router.post("/actions/run-ingestion", response_model=dict)
 def trigger_ingestion(background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin=Depends(get_current_admin)):
     from ..ingestion.pipeline import run_ingestion_background
-    if get_setting(db, "ingestion_status", "idle") == "running": raise HTTPException(status_code=409, detail="Ingestion is already running - check Operations")
-    log_audit(db, "ingestion", None, "manual_trigger", admin); db.commit(); background_tasks.add_task(run_ingestion_background)
+    if get_setting(db, "ingestion_status", "idle") == "running": raise HTTPException(status_code=409, detail="Ingestion is already running - check Jobs")
+    log_audit(db, "ingestion", None, "manual_trigger", admin); db.commit(); background_tasks.add_task(run_ingestion_background, "manual")
     return {"status": "in_progress", "detail": "Ingestion started in the background."}
 
 @router.get("/actions/ingestion-status", response_model=dict)
@@ -196,7 +215,7 @@ def _email_worker(mode: str, force: bool = False, recipient: str = "", language:
 def trigger_send_emails(background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin=Depends(get_current_admin)):
     if get_job(db, "email").get("status") == "in_progress": return {"status": "in_progress", "detail": "Email delivery is already running"}
     log_audit(db, "email", None, "manual_send_triggered", admin); db.commit(); background_tasks.add_task(_email_worker, "manual", True)
-    return {"status": "in_progress", "detail": "Email delivery started. Follow the status in Admin → Operations."}
+    return {"status": "in_progress", "detail": "Email delivery started. Follow the status in Admin → Jobs."}
 
 @router.post("/actions/send-test-email", response_model=dict)
 def trigger_test_email(background_tasks: BackgroundTasks, db: Session = Depends(get_db), user=Depends(get_current_developer_or_admin)):
