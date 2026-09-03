@@ -1,17 +1,19 @@
-"""
-Endpoints called by the GitHub Actions cron workflows (see .github/workflows/).
-Protected by a shared secret header rather than user JWT auth, since these
-calls come from an automated job, not a logged-in browser.
+"""Endpoints called by GitHub Actions cron workflows.
+
+The Render runtime scheduler owns exact-minute delivery. GitHub Actions remains
+an external recovery trigger and sandbox poller, so the system still works if
+one scheduler tick is missed.
 """
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..config import settings
 from ..seed import get_setting
 from ..ingestion.pipeline import run_ingestion_background
 from ..email_service.sender import send_daily_emails
 from ..services.test_scheduler import run_due_test_email
+from ..services.job_status import start_job, complete_job, fail_job, get_job
 
 router = APIRouter(prefix="/internal", tags=["internal/cron"])
 
@@ -19,6 +21,24 @@ router = APIRouter(prefix="/internal", tags=["internal/cron"])
 def verify_cron_secret(x_cron_secret: str = Header(default="")):
     if not settings.CRON_SECRET or x_cron_secret != settings.CRON_SECRET:
         raise HTTPException(status_code=401, detail="Invalid or missing cron secret")
+
+
+def _scheduled_email_worker():
+    db = SessionLocal()
+    try:
+        start_job(db, "email", mode="cron_recovery")
+        result = send_daily_emails(db, force=False)
+        if result.get("status") == "completed":
+            complete_job(db, "email", result)
+        elif result.get("status") == "scheduled":
+            # Do not turn a healthy waiting state into a failure.
+            complete_job(db, "email", result)
+        else:
+            fail_job(db, "email", result.get("detail", "Email job did not complete"), result)
+    except Exception as exc:
+        fail_job(db, "email", str(exc))
+    finally:
+        db.close()
 
 
 @router.post("/run-ingestion")
@@ -32,13 +52,16 @@ def cron_run_ingestion(background_tasks: BackgroundTasks, db: Session = Depends(
 
 
 @router.post("/send-emails")
-def cron_send_emails(db: Session = Depends(get_db), _=Depends(verify_cron_secret)):
+def cron_send_emails(background_tasks: BackgroundTasks, db: Session = Depends(get_db), _=Depends(verify_cron_secret)):
     if get_setting(db, "scheduling_mode", "auto") == "manual":
         return {"status": "skipped", "detail": "scheduling_mode is 'manual' - scheduled sending is disabled"}
-    return send_daily_emails(db, force=False)
+    existing = get_job(db, "email")
+    if existing.get("status") == "in_progress":
+        return {"status": "in_progress", "detail": "Email delivery is already running"}
+    background_tasks.add_task(_scheduled_email_worker)
+    return {"status": "in_progress", "detail": "Email scheduler check started"}
 
 
 @router.post("/run-sandbox-test-email")
 def cron_run_sandbox_test_email(db: Session = Depends(get_db), _=Depends(verify_cron_secret)):
-    """Execute a due one-shot developer test email, never a subscriber email."""
     return run_due_test_email(db)
