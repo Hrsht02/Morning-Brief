@@ -2,8 +2,9 @@ name: Ingest News
 
 on:
   schedule:
-    - cron: "0 * * * *"
-    - cron: "15 18 * * *" # 23:45 IST final pass
+    # The backend database schedule is authoritative. This five-minute poll is
+    # only a recovery trigger when the Render process misses a scheduler tick.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -15,15 +16,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Call backend ingestion endpoint with retries
+      - name: Call backend schedule-aware ingestion endpoint with retries
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           set -euo pipefail
+          test -n "${BACKEND_URL}" || { echo "BACKEND_URL GitHub secret is missing"; exit 1; }
+          test -n "${CRON_SECRET}" || { echo "CRON_SECRET GitHub secret is missing"; exit 1; }
           for attempt in 1 2 3 4 5; do
             if curl --fail --show-error --silent --retry 0 --max-time 120 \
-              -X POST "${BACKEND_URL}/internal/run-ingestion" \
+              -X POST "${BACKEND_URL%/}/internal/run-ingestion" \
               -H "X-Cron-Secret: ${CRON_SECRET}"; then
               exit 0
             fi
