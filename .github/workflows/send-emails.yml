@@ -2,8 +2,8 @@ name: Send Daily Emails
 
 on:
   schedule:
-    # Backend evaluates each subscriber in their own timezone and sends only
-    # during the fixed 06:00 local-time window.
+    # The backend database schedule is authoritative. This five-minute poll is
+    # only a recovery trigger when the Render process misses a scheduler tick.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
@@ -25,7 +25,7 @@ jobs:
           test -n "${BACKEND_URL}" || { echo "BACKEND_URL GitHub secret is missing"; exit 1; }
           test -n "${CRON_SECRET}" || { echo "CRON_SECRET GitHub secret is missing"; exit 1; }
 
-      - name: Call backend email endpoint with retries
+      - name: Call backend schedule-aware email endpoint with retries
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
