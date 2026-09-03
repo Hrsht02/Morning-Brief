@@ -1,3 +1,4 @@
+import json
 import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from .seed import run_seed, get_setting, set_setting
 from .routers import auth, users, editions, categories, admin, scheduler, api_v1
 from .routers import operations, sandbox, diagnostics
 from .services.runtime_scheduler import start_runtime_scheduler, stop_runtime_scheduler
+from .services.schedule_service import configure_schedule, get_schedule
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("morning_brief")
@@ -42,15 +44,25 @@ def on_startup():
     run_additive_migrations()
     db = SessionLocal()
     try:
+        legacy_email_time = get_setting(db, "email_send_time", "") or get_setting(db, "email_send_window_start", "06:00")
+        legacy_ingestion_time = get_setting(db, "final_ingestion_time", "") or (f"{get_setting(db, 'final_ingestion_hour', '23').zfill(2)}:00")
+        had_email_schedule = bool(get_setting(db, "production_email_schedule", ""))
+        had_ingestion_schedule = bool(get_setting(db, "production_ingestion_schedule", ""))
         run_seed(db)
-        # Add new schedule settings without overwriting existing administrator choices.
-        if not get_setting(db, "email_send_time", ""):
-            set_setting(db, "email_send_time", get_setting(db, "email_send_window_start", "06:00"), "Exact daily production email trigger time in admin timezone, HH:MM")
-        if not get_setting(db, "final_ingestion_time", ""):
-            set_setting(db, "final_ingestion_time", f"{get_setting(db, 'final_ingestion_hour', '23').zfill(2)}:00", "Admin-configured final ingestion/deadline time in HH:MM")
+        if not had_email_schedule:
+            try: configure_schedule(db, "email", frequency="daily", date=None, time=legacy_email_time)
+            except ValueError: configure_schedule(db, "email", frequency="daily", date=None, time="06:00")
+        else:
+            get_schedule(db, "email")
+        if not had_ingestion_schedule:
+            # Preserve the previous final-ingestion timing as the first configurable daily schedule.
+            try: configure_schedule(db, "ingestion", frequency="daily", date=None, time=legacy_ingestion_time, freshness_mode="since_last_successful")
+            except ValueError: configure_schedule(db, "ingestion", frequency="daily", date=None, time="23:00", freshness_mode="since_last_successful")
+        else:
+            get_schedule(db, "ingestion")
         db.commit()
     except Exception as exc:
-        logger.error("Seeding failed (app will still start): %s", exc)
+        logger.error("Seeding/schedule migration failed (app will still start): %s", exc)
     finally:
         db.close()
     start_runtime_scheduler()
