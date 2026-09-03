@@ -32,19 +32,25 @@ def _run_email_worker(schedule):
 
 
 def _run_ingestion_worker(schedule):
-    db = SessionLocal()
     try:
         from ..ingestion.pipeline import run_ingestion_background
-        cutoff = ingestion_cutoff(db, schedule)
+        db = SessionLocal()
+        try: cutoff = ingestion_cutoff(db, schedule)
+        finally: db.close()
         run_ingestion_background(mode="scheduled", freshness_after=cutoff)
-        result = get_job(db, "ingestion")
-        if result.get("status") == "completed": finish_schedule(db, "ingestion", "completed", result.get("result"))
-        else: finish_schedule(db, "ingestion", "failed", result.get("result") or {"error": result.get("error")})
+        db = SessionLocal()
+        try:
+            result = get_job(db, "ingestion")
+            if result.get("status") == "completed": finish_schedule(db, "ingestion", "completed", result.get("result"))
+            else: finish_schedule(db, "ingestion", "failed", result.get("result") or {"error": result.get("error")})
+        finally: db.close()
     except Exception as exc:
         logger.exception("Scheduled ingestion failed")
-        finish_schedule(db, "ingestion", "failed", {"error": str(exc)})
+        db = SessionLocal()
+        try: fail_job(db, "ingestion", str(exc)); finish_schedule(db, "ingestion", "failed", {"error": str(exc)})
+        finally: db.close()
     finally:
-        db.close(); _locks["ingestion"].release()
+        _locks["ingestion"].release()
 
 
 def _run_test_worker():
@@ -63,24 +69,28 @@ def _run_test_worker():
         db.close(); _locks["test_email"].release()
 
 
-def _claim_and_launch(db, job_type, target):
-    if not _locks[job_type].acquire(blocking=False): return
-    claimed = claim_due(db, job_type)
-    if not claimed:
-        _locks[job_type].release(); return
-    worker = _run_email_worker if job_type == "email" else _run_ingestion_worker
-    threading.Thread(target=worker, args=(claimed,), daemon=True, name=f"{job_type}-scheduler-worker").start()
+def run_due_production_job(job_type: str) -> dict:
+    """Claim and launch one due production job; safe for runtime or cron calls."""
+    if job_type not in {"email", "ingestion"}: return {"status": "error", "detail": "Unsupported production job"}
+    db = SessionLocal()
+    try:
+        if get_setting(db, "scheduling_mode", "auto").lower() != "auto": return {"status": "skipped", "detail": "Automatic scheduling is disabled"}
+        if get_job(db, job_type).get("status") == "in_progress": return {"status": "in_progress", "detail": f"{job_type} is already running"}
+        if not _locks[job_type].acquire(blocking=False): return {"status": "in_progress", "detail": f"{job_type} is already being claimed"}
+        schedule = claim_due(db, job_type)
+        if not schedule:
+            _locks[job_type].release(); return {"status": "waiting", "detail": "No due schedule"}
+        worker = _run_email_worker if job_type == "email" else _run_ingestion_worker
+        threading.Thread(target=worker, args=(schedule,), daemon=True, name=f"{job_type}-scheduler-worker").start()
+        return {"status": "in_progress", "detail": f"{job_type} schedule claimed and started"}
+    finally:
+        db.close()
 
 
 def _tick():
-    db = SessionLocal()
-    try:
-        if get_setting(db, "scheduling_mode", "auto").lower() == "auto":
-            for job_type in ("ingestion", "email"):
-                existing = get_job(db, job_type)
-                if existing.get("status") != "in_progress": _claim_and_launch(db, job_type, get_schedule(db, job_type))
-    finally:
-        db.close()
+    for job_type in ("ingestion", "email"):
+        try: run_due_production_job(job_type)
+        except Exception: logger.exception("%s scheduler tick failed", job_type)
 
     db = SessionLocal()
     try:
@@ -92,12 +102,9 @@ def _tick():
                 if due.tzinfo is None: due = due.replace(tzinfo=datetime.timezone.utc)
                 if datetime.datetime.now(datetime.timezone.utc) >= due:
                     threading.Thread(target=_run_test_worker, daemon=True, name="test-email-worker").start()
-                else:
-                    _locks["test_email"].release()
-            except ValueError:
-                _locks["test_email"].release()
-    finally:
-        db.close()
+                else: _locks["test_email"].release()
+            except ValueError: _locks["test_email"].release()
+    finally: db.close()
 
 
 def _loop():
