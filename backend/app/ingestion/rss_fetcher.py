@@ -1,5 +1,5 @@
 """Fetch and normalize active RSS sources with per-source isolation."""
-import datetime, logging, re
+import calendar, datetime, logging, re
 import feedparser, httpx
 from sqlalchemy.orm import Session
 from .. import models
@@ -9,19 +9,28 @@ logger = logging.getLogger("morning_brief.ingestion")
 FETCH_TIMEOUT_SECONDS = 15
 
 class RawArticle:
-    __slots__ = ("title", "link", "summary", "source_name", "default_category", "country_code", "trust_tier", "source_legal_risk_level")
-    def __init__(self, title, link, summary, source_name, default_category, trust_tier, country_code="IN", source_legal_risk_level="standard"):
+    __slots__ = ("title", "link", "summary", "source_name", "default_category", "country_code", "trust_tier", "source_legal_risk_level", "published_at")
+    def __init__(self, title, link, summary, source_name, default_category, trust_tier, country_code="IN", source_legal_risk_level="standard", published_at=None):
         self.title=(title or "").strip(); self.link=(link or "").strip(); self.summary=(summary or "").strip()
         self.source_name=source_name; self.default_category=default_category; self.country_code=(country_code or "GLOBAL").upper()
-        self.trust_tier=trust_tier; self.source_legal_risk_level=source_legal_risk_level
+        self.trust_tier=trust_tier; self.source_legal_risk_level=source_legal_risk_level; self.published_at=published_at
 
 def _extract_domain(url):
     match=re.search(r"://(?:www\.)?([^/]+)", url or "")
     return match.group(1).lower() if match else ""
 
-def fetch_all_active_sources(db: Session, blocked_domains=None):
+def _entry_time(entry):
+    for field in ("published_parsed", "updated_parsed"):
+        parsed=getattr(entry, field, None)
+        if parsed:
+            try: return datetime.datetime.fromtimestamp(calendar.timegm(parsed), tz=datetime.timezone.utc)
+            except (TypeError, ValueError, OverflowError): pass
+    return None
+
+def fetch_all_active_sources(db: Session, blocked_domains=None, published_after: datetime.datetime | None = None):
     blocked_domains=blocked_domains or set(); max_entries=max(1, min(int(get_setting(db,"max_entries_per_source","15")),100))
     timeout=max(5, min(int(get_setting(db,"source_fetch_timeout_seconds","15")),60))
+    if published_after and published_after.tzinfo is None: published_after=published_after.replace(tzinfo=datetime.timezone.utc)
     articles=[]
     for source in db.query(models.Source).filter(models.Source.is_active.is_(True)).all():
         source_domain=_extract_domain(source.rss_url)
@@ -35,7 +44,10 @@ def fetch_all_active_sources(db: Session, blocked_domains=None):
             for entry in parsed.entries[:max_entries]:
                 title=getattr(entry,"title",None); link=getattr(entry,"link",None); summary=getattr(entry,"summary","") or getattr(entry,"description","")
                 if not title or not link: continue
-                articles.append(RawArticle(title,link,summary,source.name,source.default_category,source.trust_tier,source.country_code,source.legal_risk_level)); count+=1
+                published_at=_entry_time(entry)
+                if published_after is not None and (published_at is None or published_at <= published_after):
+                    continue
+                articles.append(RawArticle(title,link,summary,source.name,source.default_category,source.trust_tier,source.country_code,source.legal_risk_level,published_at)); count+=1
             source.last_fetched_at=datetime.datetime.utcnow(); source.last_fetch_error=None
             logger.info("Fetched %s entries from %s",count,source.name)
         except Exception as exc:
