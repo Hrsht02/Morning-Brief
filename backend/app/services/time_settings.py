@@ -1,5 +1,6 @@
-"""Centralized parsing and scheduling helpers for admin-configured times."""
+"""Centralized timezone and schedule helpers."""
 import datetime
+import json
 import zoneinfo
 from sqlalchemy.orm import Session
 from ..seed import get_setting
@@ -28,9 +29,15 @@ def admin_timezone(db: Session):
 
 
 def configured_email_time(db: Session) -> tuple[int, int]:
-    # The database setting is the source of truth. The fallback is only for
-    # first-start installations where the seed row has not been created yet.
-    return parse_hhmm(get_setting(db, "email_send_time", "06:00"))
+    """Return the production schedule time; legacy settings are fallback only."""
+    raw = get_setting(db, "production_email_schedule", "")
+    if raw:
+        try:
+            schedule = json.loads(raw)
+            return parse_hhmm(schedule.get("time", DEFAULT_EMAIL_TIME))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return parse_hhmm(get_setting(db, "email_send_time", DEFAULT_EMAIL_TIME))
 
 
 def is_exact_minute(db: Session, now_utc: datetime.datetime | None = None) -> bool:
