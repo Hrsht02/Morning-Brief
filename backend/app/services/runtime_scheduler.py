@@ -1,47 +1,50 @@
-"""In-process scheduler for exact admin-configured minute triggers."""
+"""In-process exact-time scheduler for admin-configured production jobs."""
 from __future__ import annotations
 import datetime
 import logging
 import threading
 from ..database import SessionLocal
-from ..seed import get_setting, set_setting
+from ..seed import get_setting
 from .job_status import start_job, complete_job, fail_job, get_job
-from .time_settings import admin_timezone, configured_email_time
+from .schedule_service import claim_due, finish_schedule, get_schedule, ingestion_cutoff
 
 logger = logging.getLogger("morning_brief.runtime_scheduler")
 _stop = threading.Event()
 _thread = None
-_email_lock = threading.Lock()
-_test_lock = threading.Lock()
+_locks = {"email": threading.Lock(), "ingestion": threading.Lock(), "test_email": threading.Lock()}
 
 
-def _today_key(db):
-    return datetime.datetime.now(admin_timezone(db)).date().isoformat()
-
-
-def _claim_daily_email(db) -> bool:
-    today = _today_key(db)
-    if get_setting(db, "email_last_trigger_date", "") == today:
-        return False
-    set_setting(db, "email_last_trigger_date", today)
-    db.commit()
-    return True
-
-
-def _run_email_worker():
+def _run_email_worker(schedule):
     db = SessionLocal()
     try:
         start_job(db, "email", mode="scheduled")
         from ..email_service.sender import send_daily_emails
-        result = send_daily_emails(db, force=False)
-        if result.get("status") == "completed": complete_job(db, "email", result)
-        else: fail_job(db, "email", result.get("detail", "Scheduled email did not complete"), result)
+        result = send_daily_emails(db, force=True)
+        if result.get("status") == "completed":
+            complete_job(db, "email", result); finish_schedule(db, "email", "completed", result)
+        else:
+            fail_job(db, "email", result.get("detail", "Scheduled email did not complete"), result); finish_schedule(db, "email", "failed", result)
     except Exception as exc:
         logger.exception("Scheduled email failed")
-        fail_job(db, "email", str(exc))
+        fail_job(db, "email", str(exc)); finish_schedule(db, "email", "failed", {"error": str(exc)})
     finally:
-        db.close()
-        _email_lock.release()
+        db.close(); _locks["email"].release()
+
+
+def _run_ingestion_worker(schedule):
+    db = SessionLocal()
+    try:
+        from ..ingestion.pipeline import run_ingestion_background
+        cutoff = ingestion_cutoff(db, schedule)
+        run_ingestion_background(mode="scheduled", freshness_after=cutoff)
+        result = get_job(db, "ingestion")
+        if result.get("status") == "completed": finish_schedule(db, "ingestion", "completed", result.get("result"))
+        else: finish_schedule(db, "ingestion", "failed", result.get("result") or {"error": result.get("error")})
+    except Exception as exc:
+        logger.exception("Scheduled ingestion failed")
+        finish_schedule(db, "ingestion", "failed", {"error": str(exc)})
+    finally:
+        db.close(); _locks["ingestion"].release()
 
 
 def _run_test_worker():
@@ -57,21 +60,25 @@ def _run_test_worker():
         logger.exception("Scheduled test email failed")
         fail_job(db, "test_email", str(exc))
     finally:
-        db.close()
-        _test_lock.release()
+        db.close(); _locks["test_email"].release()
+
+
+def _claim_and_launch(db, job_type, target):
+    if not _locks[job_type].acquire(blocking=False): return
+    claimed = claim_due(db, job_type)
+    if not claimed:
+        _locks[job_type].release(); return
+    worker = _run_email_worker if job_type == "email" else _run_ingestion_worker
+    threading.Thread(target=worker, args=(claimed,), daemon=True, name=f"{job_type}-scheduler-worker").start()
 
 
 def _tick():
     db = SessionLocal()
     try:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        local_now = now.astimezone(admin_timezone(db))
-        hour, minute = configured_email_time(db)
-        automatic = get_setting(db, "scheduling_mode", "auto") == "auto"
-        if automatic and local_now.hour == hour and local_now.minute == minute:
-            existing = get_job(db, "email")
-            if existing.get("status") != "in_progress" and _claim_daily_email(db) and _email_lock.acquire(blocking=False):
-                threading.Thread(target=_run_email_worker, daemon=True, name="daily-email-worker").start()
+        if get_setting(db, "scheduling_mode", "auto").lower() == "auto":
+            for job_type in ("ingestion", "email"):
+                existing = get_job(db, job_type)
+                if existing.get("status") != "in_progress": _claim_and_launch(db, job_type, get_schedule(db, job_type))
     finally:
         db.close()
 
@@ -79,22 +86,22 @@ def _tick():
     try:
         enabled = get_setting(db, "sandbox_test_email_enabled", "false").lower() == "true"
         target = get_setting(db, "sandbox_test_email_scheduled_at", "")
-        if enabled and target:
+        if enabled and target and _locks["test_email"].acquire(blocking=False):
             try:
                 due = datetime.datetime.fromisoformat(target)
                 if due.tzinfo is None: due = due.replace(tzinfo=datetime.timezone.utc)
                 if datetime.datetime.now(datetime.timezone.utc) >= due:
-                    existing = get_job(db, "test_email")
-                    if existing.get("status") != "in_progress" and _test_lock.acquire(blocking=False):
-                        threading.Thread(target=_run_test_worker, daemon=True, name="test-email-worker").start()
+                    threading.Thread(target=_run_test_worker, daemon=True, name="test-email-worker").start()
+                else:
+                    _locks["test_email"].release()
             except ValueError:
-                pass
+                _locks["test_email"].release()
     finally:
         db.close()
 
 
 def _loop():
-    logger.info("Exact-time runtime scheduler started")
+    logger.info("Unified exact-time runtime scheduler started")
     while not _stop.is_set():
         try: _tick()
         except Exception: logger.exception("Runtime scheduler tick failed")
