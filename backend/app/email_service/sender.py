@@ -21,11 +21,7 @@ def _is_scheduled_time_now(db: Session) -> bool:
 
 
 def _is_users_send_time_now(user, window_minutes=60):
-    """Backward-compatible helper for legacy callers/tests.
-
-    Production delivery no longer uses per-user send_hour/send_minute. This
-    helper is retained only so older integrations do not break.
-    """
+    """Backward-compatible legacy helper; production delivery is globally scheduled."""
     try: tz = zoneinfo.ZoneInfo(user.timezone)
     except Exception: tz = zoneinfo.ZoneInfo("UTC")
     now = datetime.datetime.now(tz)
@@ -63,18 +59,20 @@ def _already_delivered_current_content(db: Session, user_id: int, edition_date: 
 
 
 def send_daily_emails(db: Session, force=False):
-    """Send the current approved edition at the configured global schedule."""
+    """Send the current approved edition using the global administrator schedule."""
     if not force and not _is_scheduled_time_now(db):
         hour, minute = configured_email_time(db)
         return {"status": "scheduled", "sent": 0, "failed": 0, "skipped": 0, "detail": f"Waiting for scheduled time {hour:02d}:{minute:02d}"}
     users = db.query(models.User).filter(models.User.is_active.is_(True), models.User.onboarded.is_(True), models.User.role == "user").all()
     sent = failed = skipped = 0
     skip_reasons = {"no_edition": 0, "already_delivered": 0, "outside_schedule": 0, "no_stories": 0, "no_personalized_stories": 0}
+    admin_today = datetime.datetime.now(datetime.timezone.utc).astimezone(admin_timezone(db)).date()
     for user in users:
         try: tz = zoneinfo.ZoneInfo(user.timezone)
         except Exception: tz = zoneinfo.ZoneInfo("UTC")
-        local_today_date = datetime.datetime.now(tz).date(); local_today = local_today_date.isoformat()
-        edition_date = _get_latest_approved_edition_date(db, local_today_date) if force else local_today
+        # The production schedule is global; subscriber timezone is retained for account/localization compatibility.
+        local_today_date = admin_today
+        edition_date = _get_latest_approved_edition_date(db, local_today_date)
         if not edition_date: skipped += 1; skip_reasons["no_edition"] += 1; continue
         stories = _get_approved_stories_for_edition(db, edition_date)
         if not stories: skipped += 1; skip_reasons["no_stories"] += 1; continue
@@ -93,7 +91,7 @@ def send_daily_emails(db: Session, force=False):
 
 
 def send_test_email(db: Session, test_recipient: str, language: str = "en"):
-    today = datetime.date.today(); edition_date = _get_latest_approved_edition_date(db, today)
+    today = datetime.datetime.now(datetime.timezone.utc).astimezone(admin_timezone(db)).date(); edition_date = _get_latest_approved_edition_date(db, today)
     if not edition_date: return {"status": "skipped", "detail": "No approved production stories are available yet"}
     stories = _get_approved_stories_for_edition(db, edition_date)
     if not stories: return {"status": "skipped", "detail": "No approved production stories are available yet"}
