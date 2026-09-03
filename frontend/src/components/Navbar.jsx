@@ -1,1 +1,44 @@
-import {Link,useNavigate} from "react-router-dom";import{useAuth}from "../context/AuthContext";export default function Navbar(){const{user,logout}=useAuth();const navigate=useNavigate();return <div className="navbar"><div className="navbar-inner"><Link to="/" className="brand">Morning Brief</Link><div className="nav-links">{user?<><Link to="/edition">Today</Link><Link to="/preferences">Preferences</Link>{user.is_admin&&<><Link to="/admin" className="admin-pill">Admin</Link><Link to="/admin/approved">Approved News</Link><Link to="/admin/country-sources">Country & Sources</Link><Link to="/admin/jobs">Jobs</Link></>}<button onClick={()=>{logout();navigate("/login");}}>Log out</button></>:<><Link to="/login">Log in</Link><Link to="/signup">Sign up</Link></>}</div></div></div>
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
+
+export default function Navbar() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  return (
+    <div className="navbar">
+      <div className="navbar-inner">
+        <Link to="/" className="brand">Morning Brief</Link>
+        <div className="nav-links">
+          {user ? (
+            <>
+              <Link to="/edition">Today</Link>
+              <Link to="/preferences">Preferences</Link>
+              {user.is_admin && (
+                <>
+                  <Link to="/admin" className="admin-pill">Admin</Link>
+                  <Link to="/admin/approved">Approved News</Link>
+                  <Link to="/admin/country-sources">Country &amp; Sources</Link>
+                  <Link to="/admin/jobs">Jobs</Link>
+                </>
+              )}
+              <button
+                onClick={() => {
+                  logout();
+                  navigate("/login");
+                }}
+              >
+                Log out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link to="/login">Log in</Link>
+              <Link to="/signup">Sign up</Link>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
