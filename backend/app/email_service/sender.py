@@ -39,6 +39,12 @@ def _get_approved_stories_for_edition(db: Session, edition_date: str):
     return db.query(models.Story).options(joinedload(models.Story.citations)).filter(models.Story.edition_date == edition_date, models.Story.is_published.is_(True), models.Story.publication_status == "approved", models.Story.is_test_content.is_(False)).order_by(models.Story.is_pinned.desc(), models.Story.confidence_score.desc(), models.Story.created_at.asc()).all()
 
 
+def _get_latest_approved_edition_date(db: Session, local_today: datetime.date) -> str | None:
+    """Compatibility helper for diagnostics; production delivery no longer falls back to older editions."""
+    row = db.query(models.Story.edition_date).filter(models.Story.edition_date == local_today.isoformat(), models.Story.is_published.is_(True), models.Story.publication_status == "approved", models.Story.is_test_content.is_(False)).order_by(models.Story.edition_date.desc()).first()
+    return row[0] if row else None
+
+
 def _already_delivered_current_content(db: Session, user_id: int, edition_date: str, stories):
     last_log = db.query(models.EmailLog).filter(models.EmailLog.user_id == user_id, models.EmailLog.edition_date == edition_date, models.EmailLog.status == "sent").order_by(models.EmailLog.sent_at.desc()).first()
     if not last_log: return False
