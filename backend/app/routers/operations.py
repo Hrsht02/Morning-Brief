@@ -32,17 +32,25 @@ def job_status(db: Session = Depends(get_db), _=Depends(get_current_developer_or
     ingestion_schedule = get_schedule(db, "ingestion")
     test_schedule = {"enabled": get_setting(db, "sandbox_test_email_enabled", "false").lower() == "true", "scheduled_at": get_setting(db, "sandbox_test_email_scheduled_at", "") or None}
     ingestion_job = get_job(db, "ingestion")
+    scheduler = {
+        "last_tick_at": get_setting(db, "scheduler_last_tick_at", "") or None,
+        "last_ingestion_claim": get_setting(db, "scheduler_last_ingestion_claim", "") or None,
+        "last_email_claim": get_setting(db, "scheduler_last_email_claim", "") or None,
+        "last_ingestion_start": get_setting(db, "scheduler_last_ingestion_start", "") or None,
+        "last_email_start": get_setting(db, "scheduler_last_email_start", "") or None,
+    }
     return {
         "ingestion": {"status": ingestion_job.get("status", "ready"), "started_at": get_setting(db, "ingestion_started_at", ""), "completed_at": get_setting(db, "ingestion_completed_at", ""), "last_result": last, "job": ingestion_job},
         "email": get_job(db, "email"),
         "test_email": get_job(db, "test_email"),
+        "scheduler": scheduler,
         "schedules": {"timezone": get_setting(db, "admin_timezone", "Asia/Kolkata"), "email": email_schedule, "ingestion": ingestion_schedule, "test_email": test_schedule, "mode": get_setting(db, "scheduling_mode", "auto")},
         "schedule": {"mode": get_setting(db, "scheduling_mode", "auto"), "admin_timezone": get_setting(db, "admin_timezone", "Asia/Kolkata"), "email_time": email_schedule.get("time", "06:00"), "next_email_at": email_schedule.get("next_run_at"), "test_schedule": test_schedule},
     }
 
 @router.get("/health/details", response_model=dict)
 def detailed_health(db: Session = Depends(get_db), _=Depends(get_current_developer_or_admin)):
-    return {"status": "ok", "checked_at": datetime.datetime.utcnow().isoformat(), "database": "ok", "groq_configured": bool(settings.GROQ_API_KEY), "gemini_configured": bool(settings.GEMINI_API_KEY), "brevo_configured": bool(settings.BREVO_API_KEY)}
+    return {"status": "ok", "checked_at": datetime.datetime.utcnow().isoformat(), "database": "ok", "groq_configured": bool(settings.GROQ_API_KEY), "gemini_configured": bool(settings.GEMINI_API_KEY), "brevo_configured": bool(settings.BREVO_API_KEY), "scheduler_last_tick_at": get_setting(db, "scheduler_last_tick_at", "") or None}
 
 @router.post("/actions/test-automatic-email", response_model=dict)
 def test_automatic_email(db: Session = Depends(get_db), _=Depends(get_current_developer_or_admin)):
