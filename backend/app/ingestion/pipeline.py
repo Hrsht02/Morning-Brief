@@ -7,6 +7,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..seed import get_setting,set_setting
 from ..services.job_status import start_job, complete_job, fail_job, get_job
+from ..services.editorial_compliance import mandatory_human_review
 from .rss_fetcher import fetch_all_active_sources
 from .clustering import cluster_articles
 from .verification_layers import run_verification_pipeline
@@ -16,10 +17,12 @@ from ..llm.originality import rewrite_for_originality
 logger=logging.getLogger("morning_brief.pipeline")
 STALE_INGESTION_SECONDS=45*60
 
+
 def _edition_date(db):
     try:tz=ZoneInfo(get_setting(db,"admin_timezone","Asia/Kolkata"))
     except Exception:tz=ZoneInfo("Asia/Kolkata")
     return datetime.datetime.now(tz).date().isoformat()
+
 
 def run_ingestion(db:Session,test_mode=False,max_clusters=None,freshness_after=None):
     today=_edition_date(db); similarity_threshold=float(get_setting(db,"cluster_similarity_threshold","0.35")); max_sentences=int(get_setting(db,"summary_max_sentences","3")); auto_approval_threshold=float(get_setting(db,"auto_approval_similarity_threshold","0.30")); skip_verification=get_setting(db,"skip_all_verification","false").lower()=="true"; bilingual=get_setting(db,"bilingual_generation","true").lower()=="true"; blocked={d.strip().lower() for d in get_setting(db,"blocked_source_domains","").split(",") if d.strip()}; thresholds={"near_verbatim_similarity_threshold":float(get_setting(db,"near_verbatim_similarity_threshold","0.55")),"long_phrase_overlap_threshold":float(get_setting(db,"long_phrase_overlap_threshold","0.20")),"long_phrase_words":int(get_setting(db,"long_phrase_words","6")),"min_confidence_score":float(get_setting(db,"min_confidence_score","0.55"))}; categories=[c.slug for c in db.query(models.Category).filter(models.Category.is_active.is_(True)).all()] or ["general"]; layers=db.query(models.VerificationLayer).filter(models.VerificationLayer.is_enabled.is_(True)).order_by(models.VerificationLayer.sort_order).all()
@@ -45,19 +48,28 @@ def run_ingestion(db:Session,test_mode=False,max_clusters=None,freshness_after=N
         except Exception as exc:logger.warning("Originality rewrite check failed: %s",exc);cluster_errors.append({"cluster":i+1,"stage":"originality","error":str(exc)[:500]})
         stage=f"verification_cluster_{i+1}"
         try:
-            if skip_verification:flags=[];max_similarity=0.0;long_phrase=0.0;report=None;blocking_flags=[]
+            if skip_verification:flags=[];max_similarity=0.0;long_phrase=0.0;report=None;blocking_flags=[];verification_blocked=False
             else:
-                context={"cluster_articles":cluster.articles,"draft":draft,"original_snippets":originals,"thresholds":thresholds,"blocked_domains":blocked};result=run_verification_pipeline(layers,context);flags=result["all_flags"];max_similarity=context.get("max_similarity",0.0);long_phrase=context.get("max_long_phrase_overlap",0.0);report=context.get("verifier_report");blocking_flags=[f for f in flags if f in {"blocked_source","high_risk_source","near_verbatim_risk","long_phrase_copy_risk","unsupported_claims","contradiction_found","verifier_unavailable","source_policy_error","citation_completeness_error","near_verbatim_similarity_error","long_phrase_similarity_error","independent_ai_verifier_error"}]
-            auto_approved=max_similarity < auto_approval_threshold and not blocking_flags
+                context={"cluster_articles":cluster.articles,"draft":draft,"original_snippets":originals,"thresholds":thresholds,"blocked_domains":blocked};result=run_verification_pipeline(layers,context);flags=result["all_flags"];max_similarity=context.get("max_similarity",0.0);long_phrase=context.get("max_long_phrase_overlap",0.0);report=context.get("verifier_report")
+                blocking_layer_keys={layer.key for layer in layers if layer.is_blocking}
+                failed_blocking_layers=[key for key,row in result["layer_results"].items() if key in blocking_layer_keys and (not row.get("passed",False) or not row.get("available",False))]
+                if failed_blocking_layers: flags.extend([f"blocking_layer:{key}" for key in failed_blocking_layers])
+                verification_blocked=bool(failed_blocking_layers)
+            compliance_required,compliance_flags=mandatory_human_review(draft.get("headline","")+" "+draft.get("hook","")+" "+draft.get("summary",""),len(cluster.articles),report,max_similarity,auto_approval_threshold)
+            flags=list(dict.fromkeys(flags+compliance_flags))
+            # Similarity below 30% is necessary, never sufficient. Sensitive
+            # reporting and failed mandatory verification always go to review.
+            auto_approved=(not test_mode and max_similarity < auto_approval_threshold and not verification_blocked and not compliance_required)
             status="approved" if auto_approved else "pending";published=status=="approved"
         except Exception as exc:logger.exception("Verification stage failed for cluster %s: %s",i+1,exc);return {"status":"error","stage":stage,"detail":str(exc),"stories_created":created,"fetch_diagnostics":fetch_diagnostics,"cluster_errors":cluster_errors}
-        countries={getattr(a,"country_code","GLOBAL") for a in cluster.articles};country=next(iter(countries)) if len(countries)==1 else "GLOBAL";story=models.Story(edition_date=today,headline=draft["headline"],hook=draft["hook"],summary=draft["summary"],headline_hi=draft.get("headline_hi"),hook_hi=draft.get("hook_hi"),summary_hi=draft.get("summary_hi"),category_slug=draft["category_slug"],country_code=country,confidence_score=draft["confidence"],needs_review=bool(flags) and status=="pending",is_published=published,is_test_content=test_mode,publication_status=status,pipeline_stage="pending_human_review" if status=="pending" else "published",verification_flags=json.dumps(flags) if flags else None,max_source_similarity=max_similarity,max_long_phrase_overlap=long_phrase,originality_rewrite_applied=rewrite,generator_model=f"groq:{settings.GROQ_MODEL}",verifier_model=f"gemini:{settings.GEMINI_MODEL}" if report else None,verifier_report=json.dumps(report) if report else None,contradiction_flag=bool(report and report.get("contradiction_found")),citation_complete=bool(cluster.articles));db.add(story);db.flush();seen=set()
+        countries={getattr(a,"country_code","GLOBAL") for a in cluster.articles};country=next(iter(countries)) if len(countries)==1 else "GLOBAL";story=models.Story(edition_date=today,headline=draft["headline"],hook=draft["hook"],summary=draft["summary"],headline_hi=draft.get("headline_hi"),hook_hi=draft.get("hook_hi"),summary_hi=draft.get("summary_hi"),category_slug=draft["category_slug"],country_code=country,confidence_score=draft["confidence"],needs_review=status=="pending",is_published=published,is_test_content=test_mode,publication_status=status,pipeline_stage="pending_human_review" if status=="pending" else "published",verification_flags=json.dumps(flags) if flags else None,max_source_similarity=max_similarity,max_long_phrase_overlap=long_phrase,originality_rewrite_applied=rewrite,generator_model=f"groq:{settings.GROQ_MODEL}",verifier_model=f"gemini:{settings.GEMINI_MODEL}" if report else None,verifier_report=json.dumps(report) if report else None,contradiction_flag=bool(report and report.get("contradiction_found")),citation_complete=bool(cluster.articles));db.add(story);db.flush();seen=set()
         for a in cluster.articles:
             if a.link in seen:continue
             seen.add(a.link);db.add(models.Citation(story_id=story.id,source_name=a.source_name,title=a.title,url=a.link))
         created+=1
         if not test_mode and i<len(clusters)-1:time.sleep(max(0,pause))
-    db.commit();return {"status":"ok","stage":"completed","detail":f"Processed {len(clusters)} clusters; automatic approval threshold {auto_approval_threshold:.0%}","stories_created":created,"freshness_after":freshness_after.isoformat() if freshness_after else None,"fetch_diagnostics":fetch_diagnostics,"cluster_errors":cluster_errors}
+    db.commit();return {"status":"ok","stage":"completed","detail":f"Processed {len(clusters)} clusters; automatic approval threshold {auto_approval_threshold:.0%}; similarity is necessary but not sufficient","stories_created":created,"freshness_after":freshness_after.isoformat() if freshness_after else None,"fetch_diagnostics":fetch_diagnostics,"cluster_errors":cluster_errors}
+
 
 def _stale_running(db):
     if get_setting(db,"ingestion_status","idle")!="running": return False
@@ -67,6 +79,7 @@ def _stale_running(db):
         if started.tzinfo is None: started=started.replace(tzinfo=datetime.timezone.utc)
         return (datetime.datetime.now(datetime.timezone.utc)-started).total_seconds()>STALE_INGESTION_SECONDS
     except Exception:return True
+
 
 def run_ingestion_background(mode="manual",freshness_after=None):
     db=SessionLocal()
