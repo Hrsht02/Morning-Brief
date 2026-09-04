@@ -45,7 +45,11 @@ def fetch_all_active_sources(db: Session, blocked_domains=None, published_after:
                 title=getattr(entry,"title",None); link=getattr(entry,"link",None); summary=getattr(entry,"summary","") or getattr(entry,"description","")
                 if not title or not link: continue
                 published_at=_entry_time(entry)
-                if published_after is not None and (published_at is None or published_at <= published_after):
+                # Some valid RSS feeds omit published/updated timestamps. When a
+                # freshness checkpoint is configured, do not discard those entries
+                # merely because their feed has no timestamp; they still came from
+                # the source's current feed and can be deduplicated downstream.
+                if published_after is not None and published_at is not None and published_at <= published_after:
                     continue
                 articles.append(RawArticle(title,link,summary,source.name,source.default_category,source.trust_tier,source.country_code,source.legal_risk_level,published_at)); count+=1
             source.last_fetched_at=datetime.datetime.utcnow(); source.last_fetch_error=None
