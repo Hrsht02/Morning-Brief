@@ -6,27 +6,22 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from .database import Base, engine, SessionLocal, run_additive_migrations
+from . import compliance_models  # noqa: F401 - registers compliance tables before create_all
 from .config import settings
 from .seed import run_seed, get_setting, set_setting
 from .routers import auth, users, editions, categories, admin, scheduler, api_v1
 from .routers import operations, sandbox, diagnostics
+from .routers import legal
 from .services.runtime_scheduler import start_runtime_scheduler, stop_runtime_scheduler
 from .services.schedule_service import configure_schedule, get_schedule
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("morning_brief")
 
-app = FastAPI(title="Morning Brief API", description="Country-aware LLM-powered daily news digest.", version="2.0.0")
+app = FastAPI(title="Morning Brief API", description="Country-aware LLM-powered daily news digest.", version="2.1.0")
 
 VERCEL_PREVIEW_ORIGIN_REGEX = r"^https://morning-brief-[a-z0-9]+-harshit-kumars-projects-ed3c626f\.vercel\.app$"
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_origin_regex=VERCEL_PREVIEW_ORIGIN_REGEX,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=[settings.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173"], allow_origin_regex=VERCEL_PREVIEW_ORIGIN_REGEX, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -52,25 +47,20 @@ def on_startup():
         if not had_email_schedule:
             try: configure_schedule(db, "email", frequency="daily", date=None, time=legacy_email_time)
             except ValueError: configure_schedule(db, "email", frequency="daily", date=None, time="06:00")
-        else:
-            get_schedule(db, "email")
+        else: get_schedule(db, "email")
         if not had_ingestion_schedule:
-            # Preserve the previous final-ingestion timing as the first configurable daily schedule.
             try: configure_schedule(db, "ingestion", frequency="daily", date=None, time=legacy_ingestion_time, freshness_mode="since_last_successful")
             except ValueError: configure_schedule(db, "ingestion", frequency="daily", date=None, time="23:00", freshness_mode="since_last_successful")
-        else:
-            get_schedule(db, "ingestion")
+        else: get_schedule(db, "ingestion")
         db.commit()
     except Exception as exc:
         logger.error("Seeding/schedule migration failed (app will still start): %s", exc)
-    finally:
-        db.close()
+    finally: db.close()
     start_runtime_scheduler()
     logger.info("Morning Brief API started successfully.")
 
 @app.on_event("shutdown")
-def on_shutdown():
-    stop_runtime_scheduler()
+def on_shutdown(): stop_runtime_scheduler()
 
 app.include_router(auth.router)
 app.include_router(users.router)
@@ -82,11 +72,10 @@ app.include_router(sandbox.router)
 app.include_router(scheduler.router)
 app.include_router(api_v1.router)
 app.include_router(diagnostics.router)
+app.include_router(legal.router)
 
 @app.get("/health", tags=["health"])
-def health_check():
-    return {"status": "ok", "version": app.version}
+def health_check(): return {"status": "ok", "version": app.version}
 
 @app.get("/", tags=["health"])
-def root():
-    return {"message": "Morning Brief API is running. See /docs for the API reference."}
+def root(): return {"message": "Morning Brief API is running. See /docs for the API reference."}
