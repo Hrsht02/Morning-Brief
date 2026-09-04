@@ -36,3 +36,27 @@ def test_unavailable_verifier_requires_review():
     )
     assert required is True
     assert "verifier_unavailable" in flags
+
+
+def test_routine_political_story_does_not_require_review():
+    required, flags = mandatory_human_review(
+        "The Prime Minister announced a new infrastructure policy ahead of Parliament.",
+        source_count=3,
+        verifier_report={"available": True, "overall_verdict": "SUPPORTED", "contradiction_found": False},
+        max_similarity=0.10,
+        auto_threshold=0.30,
+    )
+    assert required is False
+    assert not any(flag.startswith("sensitive_election") for flag in flags)
+
+
+def test_sensitive_election_story_requires_review():
+    required, flags = mandatory_human_review(
+        "The opposition alleged vote rigging and election fraud in the constituency.",
+        source_count=3,
+        verifier_report={"available": True, "overall_verdict": "SUPPORTED", "contradiction_found": False},
+        max_similarity=0.10,
+        auto_threshold=0.30,
+    )
+    assert required is True
+    assert "sensitive_sensitive_election" in flags
