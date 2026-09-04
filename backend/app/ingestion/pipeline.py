@@ -6,7 +6,7 @@ from .. import models
 from ..config import settings
 from ..database import SessionLocal
 from ..seed import get_setting,set_setting
-from ..services.job_status import start_job, complete_job, fail_job
+from ..services.job_status import start_job, complete_job, fail_job, get_job
 from .rss_fetcher import fetch_all_active_sources
 from .clustering import cluster_articles
 from .verification_layers import run_verification_pipeline
@@ -14,10 +14,13 @@ from .verification import compute_max_similarity
 from ..llm.groq_client import summarize_cluster
 from ..llm.originality import rewrite_for_originality
 logger=logging.getLogger("morning_brief.pipeline")
+STALE_INGESTION_SECONDS=45*60
+
 def _edition_date(db):
     try:tz=ZoneInfo(get_setting(db,"admin_timezone","Asia/Kolkata"))
     except Exception:tz=ZoneInfo("Asia/Kolkata")
     return datetime.datetime.now(tz).date().isoformat()
+
 def run_ingestion(db:Session,test_mode=False,max_clusters=None,freshness_after=None):
     today=_edition_date(db); similarity_threshold=float(get_setting(db,"cluster_similarity_threshold","0.35")); max_sentences=int(get_setting(db,"summary_max_sentences","3")); require_human=get_setting(db,"require_human_approval_all","true").lower()=="true"; skip_verification=get_setting(db,"skip_all_verification","false").lower()=="true"; bilingual=get_setting(db,"bilingual_generation","true").lower()=="true"; blocked={d.strip().lower() for d in get_setting(db,"blocked_source_domains","").split(",") if d.strip()}; thresholds={"near_verbatim_similarity_threshold":float(get_setting(db,"near_verbatim_similarity_threshold","0.55")),"long_phrase_overlap_threshold":float(get_setting(db,"long_phrase_overlap_threshold","0.20")),"long_phrase_words":int(get_setting(db,"long_phrase_words","6")),"min_confidence_score":float(get_setting(db,"min_confidence_score","0.55"))}; categories=[c.slug for c in db.query(models.Category).filter(models.Category.is_active.is_(True)).all()] or ["general"]; layers=db.query(models.VerificationLayer).filter(models.VerificationLayer.is_enabled.is_(True)).order_by(models.VerificationLayer.sort_order).all()
     stage="rss_fetch"
@@ -50,16 +53,29 @@ def run_ingestion(db:Session,test_mode=False,max_clusters=None,freshness_after=N
         created+=1
         if not test_mode and i<len(clusters)-1:time.sleep(max(0,pause))
     db.commit();return {"status":"ok","stage":"completed","detail":f"Processed {len(clusters)} clusters","stories_created":created,"freshness_after":freshness_after.isoformat() if freshness_after else None,"fetch_diagnostics":fetch_diagnostics,"cluster_errors":cluster_errors}
+
+def _stale_running(db):
+    if get_setting(db,"ingestion_status","idle")!="running": return False
+    raw=get_setting(db,"ingestion_started_at","")
+    try:
+        started=datetime.datetime.fromisoformat(raw.replace("Z","+00:00"));
+        if started.tzinfo is None: started=started.replace(tzinfo=datetime.timezone.utc)
+        return (datetime.datetime.now(datetime.timezone.utc)-started).total_seconds()>STALE_INGESTION_SECONDS
+    except Exception:return True
+
 def run_ingestion_background(mode="manual",freshness_after=None):
     db=SessionLocal()
     try:
-        if get_setting(db,"ingestion_status","idle")=="running":return {"status":"in_progress","detail":"Ingestion is already running"}
-        start_job(db,"ingestion",mode=mode);set_setting(db,"ingestion_status","running","Current background ingestion status");set_setting(db,"ingestion_started_at",datetime.datetime.utcnow().isoformat());db.commit();result=run_ingestion(db,freshness_after=freshness_after)
+        if get_setting(db,"ingestion_status","idle")=="running":
+            if not _stale_running(db): return {"status":"in_progress","detail":"Ingestion is already running","stage":"lock"}
+            logger.warning("Recovering stale ingestion lock")
+            set_setting(db,"ingestion_status","recovering","Recovered stale ingestion lock");db.commit()
+        start_job(db,"ingestion",mode=mode);set_setting(db,"ingestion_status","running","Current background ingestion status");set_setting(db,"ingestion_started_at",datetime.datetime.utcnow().isoformat());set_setting(db,"ingestion_completed_at","");db.commit();result=run_ingestion(db,freshness_after=freshness_after)
         if result.get("status") in {"ok","completed"}:
             set_setting(db,"ingestion_status","ready");set_setting(db,"ingestion_last_result",json.dumps(result));set_setting(db,"ingestion_completed_at",datetime.datetime.utcnow().isoformat());set_setting(db,"last_successful_ingestion_at",datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat());db.commit();complete_job(db,"ingestion",result)
         else:
-            set_setting(db,"ingestion_status","error");set_setting(db,"ingestion_last_result",json.dumps(result));set_setting(db,"ingestion_completed_at",datetime.datetime.utcnow().isoformat());db.commit();fail_job(db,"ingestion",result.get("detail","Ingestion failed"),result)
+            error=result.get("detail") or f"Ingestion failed at stage: {result.get('stage','unknown')}";set_setting(db,"ingestion_status","error");set_setting(db,"ingestion_last_result",json.dumps(result));set_setting(db,"ingestion_completed_at",datetime.datetime.utcnow().isoformat());db.commit();fail_job(db,"ingestion",error,result)
         return result
     except Exception as exc:
-        logger.exception("Background ingestion crashed: %s",exc);set_setting(db,"ingestion_status","error");set_setting(db,"ingestion_last_result",json.dumps({"status":"error","stage":"background_worker","detail":str(exc)[:500]}));set_setting(db,"ingestion_completed_at",datetime.datetime.utcnow().isoformat());db.commit();fail_job(db,"ingestion",str(exc),{"status":"error","stage":"background_worker","detail":str(exc)[:500]});return {"status":"failed","stage":"background_worker","detail":str(exc)[:500]}
+        logger.exception("Background ingestion crashed: %s",exc);error=str(exc)[:1000];result={"status":"failed","stage":"background_worker","detail":error};set_setting(db,"ingestion_status","error");set_setting(db,"ingestion_last_result",json.dumps(result));set_setting(db,"ingestion_completed_at",datetime.datetime.utcnow().isoformat());db.commit();fail_job(db,"ingestion",error,result);return result
     finally:db.close()
