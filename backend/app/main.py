@@ -10,7 +10,7 @@ from . import compliance_models  # noqa: F401 - registers compliance tables befo
 from .config import settings
 from .seed import run_seed, get_setting, set_setting
 from .routers import auth, users, editions, categories, admin, scheduler, api_v1
-from .routers import operations, sandbox, diagnostics
+from .routers import operations, sandbox, diagnostics, quality
 from .routers import legal
 from .services.runtime_scheduler import start_runtime_scheduler, stop_runtime_scheduler
 from .services.schedule_service import configure_schedule, get_schedule
@@ -73,6 +73,7 @@ app.include_router(scheduler.router)
 app.include_router(api_v1.router)
 app.include_router(diagnostics.router)
 app.include_router(legal.router)
+app.include_router(quality.router)
 
 @app.get("/health", tags=["health"])
 def health_check(): return {"status": "ok", "version": app.version}
