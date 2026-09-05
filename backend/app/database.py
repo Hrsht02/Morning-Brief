@@ -12,7 +12,16 @@ connect_args = {"check_same_thread": False} if _is_sqlite else {
 }
 engine_kwargs = {"connect_args": connect_args, "pool_pre_ping": True}
 if not _is_sqlite:
-    engine_kwargs.update({"pool_recycle": 1800, "pool_timeout": 30})
+    # Do not keep a PostgreSQL connection around for long periods. Managed
+    # Postgres providers can close otherwise-idle SSL sockets before SQLAlchemy
+    # gets another chance to use them. pre_ping catches most stale connections;
+    # the shorter recycle window prevents the common case proactively.
+    engine_kwargs.update({
+        "pool_recycle": 300,
+        "pool_timeout": 30,
+        "pool_use_lifo": True,
+        "pool_reset_on_return": "rollback",
+    })
 engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
