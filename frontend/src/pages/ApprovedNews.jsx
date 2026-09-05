@@ -19,7 +19,8 @@ export default function ApprovedNews() {
   const load = async () => {
     try {
       setLoading(true);
-      const params = new URLSearchParams({status, edition_date:selectedDate || ""});
+      const params = new URLSearchParams({status});
+      if (selectedDate) params.set("edition_date", selectedDate);
       const [storiesRes, benchmarkRes] = await Promise.all([
         api.get(`/admin/quality/stories?${params.toString()}`),
         api.get("/admin/quality/benchmark"),
