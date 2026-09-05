@@ -10,9 +10,11 @@ from .schedule_service import claim_due, finish_schedule, ingestion_cutoff
 logger=logging.getLogger("morning_brief.runtime_scheduler")
 _stop=threading.Event();_thread=None;_locks={"email":threading.Lock(),"ingestion":threading.Lock(),"test_email":threading.Lock()}
 
+
 def _heartbeat(db,key,value):
     try:set_setting(db,key,value);db.commit()
     except Exception:db.rollback();logger.exception("Unable to persist scheduler state %s",key)
+
 
 def _run_email_worker(schedule):
     db=SessionLocal()
@@ -24,15 +26,17 @@ def _run_email_worker(schedule):
         else:
             error=result.get("detail") or f"Scheduled email failed with status: {result.get('status','unknown')}";fail_job(db,"email",error,result);finish_schedule(db,"email","failed",result)
     except Exception as exc:
-        logger.exception("Scheduled email failed");error=str(exc)[:1000];fail_job(db,"email",error,{"status":"failed","stage":"scheduler_email_worker","detail":error});finish_schedule(db,"email","failed",{"error":error})
+        logger.exception("Scheduled email failed");error=str(exc)[:1000]
+        try:db.rollback();fail_job(db,"email",error,{"status":"failed","stage":"scheduler_email_worker","detail":error});finish_schedule(db,"email","failed",{"error":error})
+        except Exception:logger.exception("Unable to persist email failure")
     finally:db.close();_locks["email"].release()
+
 
 def _run_ingestion_worker(schedule):
     try:
         from ..ingestion.pipeline import run_ingestion_background
         db=SessionLocal()
-        try:
-            cutoff=ingestion_cutoff(db,schedule);_heartbeat(db,"scheduler_last_ingestion_start",datetime.datetime.now(datetime.timezone.utc).isoformat())
+        try:cutoff=ingestion_cutoff(db,schedule);_heartbeat(db,"scheduler_last_ingestion_start",datetime.datetime.now(datetime.timezone.utc).isoformat())
         finally:db.close()
         result=run_ingestion_background(mode="scheduled",freshness_after=cutoff)
         db=SessionLocal()
@@ -40,15 +44,17 @@ def _run_ingestion_worker(schedule):
             job=get_job(db,"ingestion")
             if result.get("status") in {"ok","completed"} or job.get("status")=="completed":finish_schedule(db,"ingestion","completed",result)
             else:
-                error=result.get("detail") or job.get("error") or f"Scheduled ingestion failed with status: {result.get('status','unknown')}"; 
-                if job.get("status")!="failed": fail_job(db,"ingestion",error,result)
+                error=result.get("detail") or job.get("error") or f"Scheduled ingestion failed with status: {result.get('status','unknown')}"
+                if job.get("status")!="failed":fail_job(db,"ingestion",error,result)
                 finish_schedule(db,"ingestion","failed",result)
         finally:db.close()
     except Exception as exc:
         logger.exception("Scheduled ingestion failed");error=str(exc)[:1000];db=SessionLocal()
-        try:fail_job(db,"ingestion",error,{"status":"failed","stage":"scheduler_ingestion_worker","detail":error});finish_schedule(db,"ingestion","failed",{"error":error})
+        try:db.rollback();fail_job(db,"ingestion",error,{"status":"failed","stage":"scheduler_ingestion_worker","detail":error});finish_schedule(db,"ingestion","failed",{"error":error})
+        except Exception:logger.exception("Unable to persist ingestion failure")
         finally:db.close()
     finally:_locks["ingestion"].release()
+
 
 def _run_test_worker():
     db=SessionLocal()
@@ -60,8 +66,20 @@ def _run_test_worker():
         elif result.get("status") in {"idle","waiting"}:fail_job(db,"test_email",result.get("detail","Test email was not due"),result)
         else:fail_job(db,"test_email",result.get("detail","Scheduled test email failed"),result)
     except Exception as exc:
-        logger.exception("Scheduled test email failed");fail_job(db,"test_email",str(exc)[:1000],{"status":"failed","detail":str(exc)[:1000]})
+        logger.exception("Scheduled test email failed");db.rollback();fail_job(db,"test_email",str(exc)[:1000],{"status":"failed","detail":str(exc)[:1000]})
     finally:db.close();_locks["test_email"].release()
+
+
+def _run_retention_cleanup():
+    db=SessionLocal()
+    try:
+        from .retention import cleanup_old_stories
+        result=cleanup_old_stories(db)
+        if result.get("status")=="completed":_heartbeat(db,"scheduler_last_retention_cleanup",datetime.datetime.now(datetime.timezone.utc).isoformat())
+    except Exception:
+        db.rollback();logger.exception("Retention cleanup failed")
+    finally:db.close()
+
 
 def run_due_production_job(job_type:str)->dict:
     if job_type not in {"email","ingestion"}:return {"status":"error","detail":"Unsupported production job"}
@@ -82,6 +100,7 @@ def run_due_production_job(job_type:str)->dict:
         raise
     finally:db.close()
 
+
 def _tick():
     now=datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat();db=SessionLocal()
     try:_heartbeat(db,"scheduler_last_tick_at",now)
@@ -96,6 +115,9 @@ def _tick():
         except Exception:logger.exception("%s scheduler tick failed",job_type)
     db=SessionLocal()
     try:
+        local_today=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        if get_setting(db,"last_retention_cleanup_date","")!=local_today:
+            threading.Thread(target=_run_retention_cleanup,daemon=True,name="retention-cleanup-worker").start()
         enabled=get_setting(db,"sandbox_test_email_enabled","false").lower()=="true";target=get_setting(db,"sandbox_test_email_scheduled_at","")
         if enabled and target and _locks["test_email"].acquire(blocking=False):
             try:
@@ -105,12 +127,14 @@ def _tick():
             except ValueError:_locks["test_email"].release()
     finally:db.close()
 
+
 def _loop():
     logger.info("Unified exact-time runtime scheduler started")
     while not _stop.is_set():
         try:_tick()
         except Exception:logger.exception("Runtime scheduler tick failed")
         _stop.wait(1.0)
+
 
 def start_runtime_scheduler():
     global _thread
