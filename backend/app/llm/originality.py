@@ -12,8 +12,12 @@ ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 PROMPT = """Rewrite the supplied news summary into genuinely original editorial language.
 Preserve ONLY facts present in the supplied source snippets. Do not add facts,
 quotes, numbers, opinions, predictions, or attribution that is not supported.
-Do not preserve distinctive source wording or sentence structure. Keep the
-meaning, names, dates, and numbers accurate. Return JSON only: {\"summary\":\"...\"}.
+Do not preserve distinctive source wording, phrases, or sentence structure.
+Rebuild the summary from the facts rather than paraphrasing sentence-by-sentence.
+Keep names, dates, numbers and the factual meaning accurate. Prefer a different
+ordering of facts when that remains clear and faithful. Do not mention that you
+are rewriting or discuss similarity. Keep it concise and within {max_sentences}
+sentences. Return JSON only: {{\"summary\":\"...\"}}.
 Summary: {summary}
 Source snippets: {sources}"""
 
@@ -22,7 +26,7 @@ def rewrite_for_originality(summary: str, source_snippets: list[str], max_senten
     if not settings.GROQ_API_KEY or not summary.strip():
         return None
     sources = "\n---\n".join(s[:900] for s in source_snippets[:5])
-    prompt = PROMPT.format(summary=summary[:1800], sources=sources)
+    prompt = PROMPT.format(summary=summary[:1800], sources=sources, max_sentences=max_sentences)
     try:
         response = httpx.post(
             ENDPOINT,
@@ -33,7 +37,7 @@ def rewrite_for_originality(summary: str, source_snippets: list[str], max_senten
                     {"role": "system", "content": "You are an originality editor. Facts must remain unchanged."},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": 0.25,
+                "temperature": 0.55,
                 "max_tokens": 700,
                 "reasoning_effort": "low",
                 "response_format": {"type": "json_object"},
@@ -42,14 +46,16 @@ def rewrite_for_originality(summary: str, source_snippets: list[str], max_senten
         )
         if response.status_code == 429:
             retry_after = response.headers.get("retry-after")
-            try: time.sleep(min(float(retry_after), 30.0)) if retry_after else time.sleep(10)
-            except ValueError: time.sleep(10)
+            try:
+                time.sleep(min(float(retry_after), 30.0) if retry_after else 10)
+            except ValueError:
+                time.sleep(10)
             response = httpx.post(
                 ENDPOINT,
                 headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}"},
                 json={"model": settings.GROQ_MODEL, "messages":[
                     {"role":"system","content":"You are an originality editor. Facts must remain unchanged."},
-                    {"role":"user","content":prompt}], "temperature":0.25, "max_tokens":700,
+                    {"role":"user","content":prompt}], "temperature":0.55, "max_tokens":700,
                     "reasoning_effort":"low", "response_format":{"type":"json_object"}}, timeout=30)
         response.raise_for_status()
         data = response.json()
