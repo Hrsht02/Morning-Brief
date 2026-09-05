@@ -1,5 +1,6 @@
 """Deterministic source-similarity and editorial safety checks."""
 import re
+from difflib import SequenceMatcher
 
 STOPWORDS = {"a","an","the","and","or","but","of","in","on","at","to","for","with","is","are","was","were","as","by","from","after","before","over","into","amid","says","say","said","will","it","its","his","her","their","this","that","new","how","why","what"}
 
@@ -9,16 +10,46 @@ def _tokenize(text: str) -> list[str]:
     return [w for w in words if w not in STOPWORDS and len(w) > 2]
 
 
-def _word_overlap_ratio(a: set, b: set) -> float:
-    if not a or not b: return 0.0
-    smaller, larger = (a, b) if len(a) <= len(b) else (b, a)
-    return len(smaller & larger) / len(smaller)
+def _word_jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _bigram_precision(a: list[str], b: list[str]) -> float:
+    """Fraction of generated adjacent word pairs also found in the source."""
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    source_bigrams = set(zip(b, b[1:]))
+    generated_bigrams = set(zip(a, a[1:]))
+    return len(generated_bigrams & source_bigrams) / len(generated_bigrams)
+
+
+def _similarity_score(summary_tokens: list[str], source_tokens: list[str]) -> float:
+    """Measure wording similarity without treating subset overlap as 100%.
+
+    The previous metric divided the intersection by the *smaller* token set.
+    A normal generated summary is usually shorter than its source, so using the
+    smaller set made a summary that merely reused many source terms look 100%
+    similar.  This score combines sequence similarity, Jaccard overlap and
+    contiguous-bigram reuse. Exact copies can still reach 1.0, while a shorter
+    summary that uses common source vocabulary no longer automatically does.
+    """
+    if not summary_tokens or not source_tokens:
+        return 0.0
+    sequence = SequenceMatcher(None, summary_tokens, source_tokens, autojunk=False).ratio()
+    jaccard = _word_jaccard(set(summary_tokens), set(source_tokens))
+    bigram_precision = _bigram_precision(summary_tokens, source_tokens)
+    combined = (0.50 * sequence) + (0.20 * jaccard) + (0.30 * bigram_precision)
+    return min(1.0, combined)
 
 
 def compute_max_similarity(summary_text: str, original_snippets: list[str]) -> float:
-    summary_tokens = set(_tokenize(summary_text))
-    if not summary_tokens: return 0.0
-    return round(max((_word_overlap_ratio(summary_tokens, set(_tokenize(s))) for s in original_snippets), default=0.0), 3)
+    summary_tokens = _tokenize(summary_text)
+    if not summary_tokens:
+        return 0.0
+    scores = (_similarity_score(summary_tokens, _tokenize(s)) for s in original_snippets)
+    return round(max(scores, default=0.0), 3)
 
 
 def compute_max_long_phrase_overlap(summary_text: str, original_snippets: list[str], phrase_words: int = 6) -> float:
@@ -29,9 +60,11 @@ def compute_max_long_phrase_overlap(summary_text: str, original_snippets: list[s
     the overall summary similarity is modest.
     """
     tokens = _tokenize(summary_text)
-    if len(tokens) < phrase_words: return 0.0
+    if len(tokens) < phrase_words:
+        return 0.0
     summary_phrases = {" ".join(tokens[i:i+phrase_words]) for i in range(len(tokens)-phrase_words+1)}
-    if not summary_phrases: return 0.0
+    if not summary_phrases:
+        return 0.0
     best = 0.0
     for source in original_snippets:
         src = _tokenize(source)
