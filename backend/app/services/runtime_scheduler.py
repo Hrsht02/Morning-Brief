@@ -37,6 +37,7 @@ def _run_ingestion_worker(schedule):
   try:
    job=get_job(db,"ingestion")
    if result.get("status") in {"ok","completed"} or job.get("status")=="completed":finish_schedule(db,"ingestion","completed",result)
+   elif result.get("status")=="cancelled" or job.get("status")=="cancelled":finish_schedule(db,"ingestion","cancelled",result)
    else:
     error=result.get("detail") or job.get("error") or f"Scheduled ingestion failed with status: {result.get('status','unknown')}"
     if job.get("status")!="failed":fail_job(db,"ingestion",error,result)
