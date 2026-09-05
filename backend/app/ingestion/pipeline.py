@@ -25,6 +25,7 @@ logger=logging.getLogger("morning_brief.pipeline")
 STALE_INGESTION_SECONDS=45*60
 MAX_ORIGINALITY_REWRITES=2
 DB_WRITE_RETRIES=3
+SETTING_READ_RETRIES=3
 
 class IngestionCancelled(Exception):
     """Raised when an administrator requests a running ingestion to stop."""
@@ -51,10 +52,23 @@ def _persist_story_with_retry(story_data,articles):
     raise last_error
 
 def _cancel_requested():
-    db=SessionLocal()
-    try:return get_setting(db,"ingestion_cancel_requested","false").lower()=="true"
-    except Exception:return False
-    finally:db.close()
+    """Read the stop flag with a fresh connection and retry transient SSL failures."""
+    last_error=None
+    for attempt in range(1,SETTING_READ_RETRIES+1):
+        db=SessionLocal()
+        try:
+            return get_setting(db,"ingestion_cancel_requested","false").lower()=="true"
+        except OperationalError as exc:
+            last_error=exc
+            logger.warning("Transient database error reading ingestion stop flag (attempt %s/%s): %s",attempt,SETTING_READ_RETRIES,exc)
+            try: db.rollback()
+            except Exception: pass
+            if attempt<SETTING_READ_RETRIES: time.sleep(min(2**(attempt-1),3))
+        except Exception:
+            return False
+        finally: db.close()
+    logger.error("Could not read ingestion stop flag after retries: %s",last_error)
+    return False
 
 def _heartbeat(stage,cluster_index=0,total_clusters=0):
     db=SessionLocal()
@@ -117,8 +131,7 @@ def run_ingestion(db:Session,test_mode=False,max_clusters=None,freshness_after=N
                     revised=rewrite_for_originality(draft["summary"],originals,max_sentences)
                     if not revised or revised.strip()==draft["summary"].strip():break
                     revised_similarity=compute_max_similarity(revised,originals)
-                    if revised_similarity >= current_similarity:
-                        break
+                    if revised_similarity >= current_similarity:break
                     draft["summary"]=revised;rewrite_count+=1
             except IngestionCancelled:raise
             except Exception as exc:logger.warning("Originality rewrite check failed: %s",exc);cluster_errors.append({"cluster":cluster_no,"stage":"originality","error":str(exc)[:500]})
@@ -165,6 +178,6 @@ def run_ingestion_background(mode="manual",freshness_after=None):
     except Exception as exc:
         logger.exception("Background ingestion crashed: %s",exc);db.rollback();error=str(exc)[:1000];result={"status":"failed","stage":"background_worker","detail":error}
         try:set_setting(db,"ingestion_status","error");set_setting(db,"ingestion_last_result",json.dumps(result));set_setting(db,"ingestion_completed_at",datetime.datetime.utcnow().isoformat());set_setting(db,"ingestion_cancel_requested","false");db.commit();fail_job(db,"ingestion",error,result)
-        except Exception:logger.exception("Unable to persist background ingestion failure")
+        except Exception:logger.exception("Unable to persist ingestion failure")
         return result
     finally:db.close()
