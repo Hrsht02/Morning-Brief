@@ -9,7 +9,7 @@ router=APIRouter(prefix="/auth",tags=["auth"])
 def _user_out(user:models.User)->schemas.UserOut:return schemas.UserOut(id=user.id,email=user.email,is_admin=user.is_admin,role=user.role,auth_provider=user.auth_provider,onboarded=user.onboarded,timezone=user.timezone,send_hour=user.send_hour,send_minute=user.send_minute,content_language=user.content_language,categories=[c.category_slug for c in user.categories])
 def _default_plan_id(db:Session):
  free_plan=db.query(models.Plan).filter(models.Plan.slug=="free").first();return free_plan.id if free_plan else None
-def _ensure_consent_row(db:Session,user_id:int,default_opt_in:bool=False):
+def _ensure_consent_row(db:Session,user_id:int,default_opt_in=False):
  row=db.query(compliance_models.UserConsent).filter_by(user_id=user_id).first()
  if row is None:db.add(compliance_models.UserConsent(user_id=user_id,email_news_opt_in=default_opt_in))
 
@@ -33,8 +33,12 @@ def google_login(payload:schemas.GoogleLoginRequest,db:Session=Depends(get_db)):
  user=db.query(models.User).filter(models.User.google_sub==google_sub).first()
  if user is None:
   user=db.query(models.User).filter(models.User.email==email).first()
-  if user is not None:user.google_sub=google_sub
-  else:user=models.User(email=email,hashed_password=generate_random_password_hash(),auth_provider="google",google_sub=google_sub,plan_id=_default_plan_id(db));db.add(user);db.flush();_ensure_consent_row(db,user.id,True);db.commit();db.refresh(user)
+  if user is not None:
+   user.google_sub=google_sub
+   _ensure_consent_row(db,user.id,False)
+  else:
+   user=models.User(email=email,hashed_password=generate_random_password_hash(),auth_provider="google",google_sub=google_sub,plan_id=_default_plan_id(db));db.add(user);db.flush();_ensure_consent_row(db,user.id,True)
+  db.commit();db.refresh(user)
  if not user.is_active:raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="This account has been deactivated")
  return schemas.TokenResponse(access_token=create_access_token(user.id))
 
