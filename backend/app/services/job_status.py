@@ -44,6 +44,12 @@ def complete_job(db: Session, name: str, result=None):
     return save_job(db, name, payload)
 
 
+def cancel_job(db: Session, name: str, result=None):
+    payload = _load(db, name) or {"name": name}
+    payload.update({"status": "cancelled", "completed_at": _now(), "result": result, "error": None})
+    return save_job(db, name, payload)
+
+
 def fail_job(db: Session, name: str, error: str, result=None):
     payload = _load(db, name) or {"name": name}
     payload.update({"status": "failed", "completed_at": _now(), "result": result, "error": str(error)[:1000]})
