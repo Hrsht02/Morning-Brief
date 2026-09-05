@@ -1,5 +1,6 @@
 """Timezone-aware, country/category-personalized email delivery."""
 import copy,datetime,logging
+from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session,joinedload
 from .. import models,compliance_models
 from ..seed import get_setting
@@ -13,10 +14,9 @@ def _is_scheduled_time_now(db:Session)->bool:
  tz=admin_timezone(db);now=datetime.datetime.now(datetime.timezone.utc).astimezone(tz);hour,minute=configured_email_time(db);return now.hour==hour and now.minute==minute
 
 def _is_users_send_time_now(user,window_minutes=60):
- try:tz=__import__("zoneinfo").zoneinfo.ZoneInfo(user.timezone)
+ try:tz=ZoneInfo(user.timezone)
  except Exception:tz=datetime.timezone.utc
- now=datetime.datetime.now(tz);target=now.replace(hour=int(user.send_hour),minute=int(user.send_minute),second=0,microsecond=0);delta=(now-target).total_seconds()/60
- return 0<=delta<=window_minutes
+ now=datetime.datetime.now(tz);target=now.replace(hour=int(user.send_hour),minute=int(user.send_minute),second=0,microsecond=0);return 0<=(now-target).total_seconds()/60<=window_minutes
 
 def _localize_for_email(story,language):
  item=copy.copy(story)
@@ -33,14 +33,12 @@ def _get_latest_approved_edition_date(db:Session,today=None):
 def _already_delivered_current_content(db:Session,user_id:int,edition_date:str,stories):
  last_log=db.query(models.EmailLog).filter(models.EmailLog.user_id==user_id,models.EmailLog.edition_date==edition_date,models.EmailLog.status=="sent").order_by(models.EmailLog.sent_at.desc()).first()
  if not last_log:return False
- newest=max((getattr(s,"reviewed_at",None) or getattr(s,"created_at",None) for s in stories),default=None)
- return not(newest and last_log.sent_at and newest>last_log.sent_at)
+ newest=max((getattr(s,"reviewed_at",None) or getattr(s,"created_at",None) for s in stories),default=None);return not(newest and last_log.sent_at and newest>last_log.sent_at)
 
 def send_daily_emails(db:Session,force=False):
  if not force and not _is_scheduled_time_now(db):
   hour,minute=configured_email_time(db);return {"status":"scheduled","sent":0,"failed":0,"skipped":0,"detail":f"Waiting for scheduled time {hour:02d}:{minute:02d}"}
- users=db.query(models.User).filter(models.User.is_active.is_(True),models.User.onboarded.is_(True),models.User.role=="user").all();sent=failed=skipped=0;skip_reasons={"no_today_edition":0,"already_delivered":0,"no_personalized_stories":0,"no_email_consent":0}
- edition=datetime.datetime.now(datetime.timezone.utc).astimezone(admin_timezone(db)).date().isoformat();stories=_get_approved_stories_for_edition(db,edition);top_n=max(1,int(get_setting(db,"email_top_n","25")))
+ users=db.query(models.User).filter(models.User.is_active.is_(True),models.User.onboarded.is_(True),models.User.role=="user").all();sent=failed=skipped=0;skip_reasons={"no_today_edition":0,"already_delivered":0,"no_personalized_stories":0,"no_email_consent":0};edition=datetime.datetime.now(datetime.timezone.utc).astimezone(admin_timezone(db)).date().isoformat();stories=_get_approved_stories_for_edition(db,edition);top_n=max(1,int(get_setting(db,"email_top_n","25")))
  for user in users:
   try:
    consent=db.query(compliance_models.UserConsent).filter_by(user_id=user.id).first()
@@ -49,8 +47,7 @@ def send_daily_emails(db:Session,force=False):
    if _already_delivered_current_content(db,user.id,edition,stories):skipped+=1;skip_reasons["already_delivered"]+=1;continue
    selected,_=select_personalized_stories(stories,user.country_code,{c.category_slug for c in user.categories},top_n)
    if not selected:skipped+=1;skip_reasons["no_personalized_stories"]+=1;continue
-   try:
-    html=render_digest_email([_localize_for_email(s,user.content_language) for s in selected],edition,settings.FRONTEND_URL,max_stories=len(selected));send_email(to_email=user.email,subject=f"Your Morning Brief — {edition}",html_content=html);user.last_sent_date=edition;db.add(models.EmailLog(user_id=user.id,edition_date=edition,status="sent"));sent+=1
+   try:html=render_digest_email([_localize_for_email(s,user.content_language) for s in selected],edition,settings.FRONTEND_URL,max_stories=len(selected));send_email(to_email=user.email,subject=f"Your Morning Brief — {edition}",html_content=html);user.last_sent_date=edition;db.add(models.EmailLog(user_id=user.id,edition_date=edition,status="sent"));sent+=1
    except EmailSendError as exc:db.rollback();db.add(models.EmailLog(user_id=user.id,edition_date=edition,status="failed",error=str(exc)[:500]));failed+=1
    except Exception as exc:logger.exception("Unexpected email error for user %s",user.id);db.rollback();db.add(models.EmailLog(user_id=user.id,edition_date=edition,status="failed",error=str(exc)[:500]));failed+=1
   except Exception as exc:logger.exception("Unexpected personalization error for user %s",user.id);db.rollback();failed+=1
