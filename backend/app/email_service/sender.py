@@ -2,7 +2,6 @@
 import copy
 import datetime
 import logging
-import zoneinfo
 from sqlalchemy.orm import Session, joinedload
 from .. import models, compliance_models
 from ..seed import get_setting
@@ -17,8 +16,6 @@ def _is_scheduled_time_now(db:Session)->bool:
     tz=admin_timezone(db);now=datetime.datetime.now(datetime.timezone.utc).astimezone(tz);hour,minute=configured_email_time(db);return now.hour==hour and now.minute==minute
 
 def _localize_for_email(story,language):
-    # Never mutate the SQLAlchemy Story object: one process may send different
-    # languages to different users.
     item=copy.copy(story)
     if language=="hi" and story.headline_hi and story.summary_hi:
         item.headline=story.headline_hi;item.hook=story.hook_hi or story.hook;item.summary=story.summary_hi
@@ -34,11 +31,6 @@ def _already_delivered_current_content(db:Session,user_id:int,edition_date:str,s
     return not(newest_approval is not None and last_log.sent_at is not None and newest_approval>last_log.sent_at)
 
 def send_daily_emails(db:Session,force=False):
-    """Send the current approved production edition to opted-in users.
-
-    Personalization is applied before the admin-configured email Top N limit.
-    The app itself does not use this email limit.
-    """
     if not force and not _is_scheduled_time_now(db):
         hour,minute=configured_email_time(db);return {"status":"scheduled","sent":0,"failed":0,"skipped":0,"detail":f"Waiting for scheduled time {hour:02d}:{minute:02d}"}
     users=db.query(models.User).filter(models.User.is_active.is_(True),models.User.onboarded.is_(True),models.User.role=="user").all()
@@ -55,10 +47,10 @@ def send_daily_emails(db:Session,force=False):
             localized=[_localize_for_email(s,user.content_language) for s in selected]
             try:
                 html=render_digest_email(localized,admin_today,settings.FRONTEND_URL,max_stories=len(localized));send_email(to_email=user.email,subject=f"Your Morning Brief — {admin_today}",html_content=html);user.last_sent_date=admin_today;db.add(models.EmailLog(user_id=user.id,edition_date=admin_today,status="sent"));sent+=1
-            except EmailSendError as exc:db.add(models.EmailLog(user_id=user.id,edition_date=admin_today,status="failed",error=str(exc)[:500]));failed+=1
-            except Exception as exc:logger.exception("Unexpected email error for user %s",user.id);db.add(models.EmailLog(user_id=user.id,edition_date=admin_today,status="failed",error=str(exc)[:500]));failed+=1
+            except EmailSendError as exc:db.rollback();db.add(models.EmailLog(user_id=user.id,edition_date=admin_today,status="failed",error=str(exc)[:500]));failed+=1
+            except Exception as exc:logger.exception("Unexpected email error for user %s",user.id);db.rollback();db.add(models.EmailLog(user_id=user.id,edition_date=admin_today,status="failed",error=str(exc)[:500]));failed+=1
         except Exception as exc:
-            logger.exception("Unexpected personalization error for user %s",user.id);db.rollback();failed+=1;db=Session
+            logger.exception("Unexpected personalization error for user %s",user.id);db.rollback();failed+=1
     db.commit();return {"status":"completed","sent":sent,"failed":failed,"skipped":skipped,"edition_date":admin_today,"email_top_n":email_top_n,"skip_reasons":skip_reasons}
 
 def send_test_email(db:Session,test_recipient:str,language:str="en"):
