@@ -3,14 +3,36 @@ from __future__ import annotations
 import datetime,logging,threading
 from ..database import SessionLocal
 from ..seed import get_setting,set_setting
-from .job_status import start_job,complete_job,fail_job,get_job
+from .job_status import start_job,complete_job,fail_job,cancel_job,get_job
 from .schedule_service import claim_due,finish_schedule,ingestion_cutoff
 logger=logging.getLogger("morning_brief.runtime_scheduler")
 _stop=threading.Event();_thread=None;_locks={"email":threading.Lock(),"ingestion":threading.Lock(),"test_email":threading.Lock(),"retention":threading.Lock()}
+STALE_INGESTION_SECONDS=45*60
 
 def _heartbeat(db,key,value):
  try:set_setting(db,key,value);db.commit()
  except Exception:db.rollback();logger.exception("Unable to persist scheduler state %s",key)
+
+def _recover_stale_ingestion_state():
+ """Clear a persisted ingestion lock left behind when the old app instance was restarted."""
+ db=SessionLocal()
+ try:
+  if get_job(db,"ingestion").get("status")!="in_progress":return
+  raw=get_setting(db,"ingestion_heartbeat_at","") or get_setting(db,"ingestion_started_at","")
+  try:
+   heartbeat=datetime.datetime.fromisoformat(raw.replace("Z","+00:00"));heartbeat=heartbeat.replace(tzinfo=datetime.timezone.utc) if heartbeat.tzinfo is None else heartbeat
+   stale=(datetime.datetime.now(datetime.timezone.utc)-heartbeat).total_seconds()>STALE_INGESTION_SECONDS
+  except Exception:stale=True
+  if not stale:return
+  now=datetime.datetime.utcnow().isoformat()
+  result={"status":"cancelled","stage":"stale_recovery","detail":"The previous ingestion process was terminated by a service restart before it could finish."}
+  set_setting(db,"ingestion_status","cancelled");set_setting(db,"ingestion_last_result",__import__("json").dumps(result));set_setting(db,"ingestion_completed_at",now);set_setting(db,"ingestion_cancel_requested","false");set_setting(db,"ingestion_current_stage","stale_recovery");set_setting(db,"ingestion_heartbeat_at",now);db.commit()
+  cancel_job(db,"ingestion",result)
+  finish_schedule(db,"ingestion","cancelled",result)
+  logger.warning("Recovered stale ingestion job left in progress after service restart")
+ except Exception:
+  db.rollback();logger.exception("Unable to recover stale ingestion state")
+ finally:db.close()
 
 def _run_email_worker(schedule):
  db=SessionLocal()
@@ -93,6 +115,7 @@ def _tick():
  now=datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat();db=SessionLocal()
  try:_heartbeat(db,"scheduler_last_tick_at",now)
  finally:db.close()
+ _recover_stale_ingestion_state()
  for job_type in ("ingestion","email"):
   try:
    result=run_due_production_job(job_type)
